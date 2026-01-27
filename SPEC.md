@@ -2,7 +2,7 @@
 
 ## Overview
 
-`last30days` is a Claude Code skill that researches a given topic across Reddit and X (Twitter) using the OpenAI Responses API and xAI Responses API respectively. It enforces a strict 30-day recency window, popularity-aware ranking, and produces actionable outputs including best practices, a prompt pack, and a reusable context snippet.
+`last30days` is a Claude Code skill that researches a given topic across Reddit and X (Twitter) using the OpenAI Responses API and xAI Responses API respectively. It enforces a strict 30-day recency window, popularity-aware ranking, and produces actionable outputs including best practices, a prompt pack, and a reusable context snippet. OpenAI auth can come from `OPENAI_API_KEY` or Codex login credentials.
 
 The skill operates in three modes depending on available API keys: **reddit-only** (OpenAI key), **x-only** (xAI key), or **both** (full cross-validation). It uses automatic model selection to stay current with the latest models from both providers, with optional pinning for stability.
 
@@ -10,7 +10,7 @@ The skill operates in three modes depending on available API keys: **reddit-only
 
 The orchestrator (`last30days.py`) coordinates discovery, enrichment, normalization, scoring, deduplication, and rendering. Each concern is isolated in `scripts/lib/`:
 
-- **env.py**: Load and validate API keys from `~/.config/last30days/.env`
+- **env.py**: Load API keys from `~/.config/last30days/.env` and Codex auth from `~/.codex/auth.json`
 - **dates.py**: Date range calculation and confidence scoring
 - **cache.py**: 24-hour TTL caching keyed by topic + date range
 - **http.py**: stdlib-only HTTP client with retry logic

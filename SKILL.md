@@ -50,13 +50,14 @@ Common patterns:
 
 ## Setup Check
 
-The skill works in three modes based on available API keys:
+The skill works in three modes based on available credentials:
 
 1. **Full Mode** (both keys): Reddit + X + WebSearch - best results with engagement metrics
 2. **Partial Mode** (one key): Reddit-only or X-only + WebSearch
 3. **Web-Only Mode** (no keys): WebSearch only - still useful, but no engagement metrics
 
 **API keys are OPTIONAL.** The skill will work without them using WebSearch fallback.
+For Reddit, OpenAI auth can come from `OPENAI_API_KEY` **or** your Codex login (`~/.codex/auth.json`). If the user isn't signed in, they should run `codex login`.
 
 ### First-Time Setup (Optional but Recommended)
 
@@ -68,7 +69,7 @@ cat > ~/.config/last30days/.env << 'ENVEOF'
 # last30days API Configuration
 # Both keys are optional - skill works with WebSearch fallback
 
-# For Reddit research (uses OpenAI's web_search tool)
+# For Reddit research (OpenAI web_search)
 OPENAI_API_KEY=
 
 # For X/Twitter research (uses xAI's x_search tool)
@@ -86,7 +87,7 @@ echo "Edit to add your API keys for enhanced research."
 
 ## Research Execution
 
-**IMPORTANT: The script handles API key detection automatically.** Run it and check the output to determine mode.
+**IMPORTANT: The script handles API key/Codex auth detection automatically.** Run it and check the output to determine mode.
 
 **Step 1: Run the research script**
 ```bash

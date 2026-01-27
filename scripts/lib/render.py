@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from . import schema
 
@@ -64,10 +64,11 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
         lines.append("**🌐 WEB SEARCH MODE** - Claude will search blogs, docs & news")
         lines.append("")
         lines.append("---")
-        lines.append("**⚡ Want better results?** Add API keys to unlock Reddit & X data:")
-        lines.append("- `OPENAI_API_KEY` → Reddit threads with real upvotes & comments")
+        lines.append("**⚡ Want better results?** Add API keys or sign in to Codex to unlock Reddit & X data:")
+        lines.append("- `OPENAI_API_KEY` or `codex login` → Reddit threads with real upvotes & comments")
         lines.append("- `XAI_API_KEY` → X posts with real likes & reposts")
         lines.append("- Edit `~/.config/last30days/.env` to add keys")
+        lines.append("- If already signed in but still seeing this, re-run `codex login`")
         lines.append("---")
         lines.append("")
 
@@ -90,7 +91,7 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
         lines.append("*💡 Tip: Add XAI_API_KEY for X/Twitter data and better triangulation.*")
         lines.append("")
     elif report.mode == "x-only" and missing_keys == "reddit":
-        lines.append("*💡 Tip: Add OPENAI_API_KEY for Reddit data and better triangulation.*")
+        lines.append("*💡 Tip: Add OPENAI_API_KEY or run `codex login` for Reddit data and better triangulation. If already signed in, re-run `codex login`.*")
         lines.append("")
 
     # Reddit items
@@ -129,7 +130,7 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
 
             # Top comment insights
             if item.comment_insights:
-                lines.append(f"  Insights:")
+                lines.append("  Insights:")
                 for insight in item.comment_insights[:3]:
                     lines.append(f"    - {insight}")
 
@@ -334,6 +335,8 @@ def render_full_report(report: schema.Report) -> str:
     lines.append("")
 
     return "\n".join(lines)
+
+
 
 
 def write_outputs(

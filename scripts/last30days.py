@@ -18,14 +18,8 @@ import argparse
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-
-# Add lib to path
-SCRIPT_DIR = Path(__file__).parent.resolve()
-sys.path.insert(0, str(SCRIPT_DIR))
-
 from lib import (
     dates,
     dedupe,
@@ -39,10 +33,12 @@ from lib import (
     schema,
     score,
     ui,
-    websearch,
     xai_x,
 )
 
+# Add lib to path
+SCRIPT_DIR = Path(__file__).parent.resolve()
+sys.path.insert(0, str(SCRIPT_DIR))
 
 def load_fixture(name: str) -> dict:
     """Load a fixture file."""
@@ -81,6 +77,8 @@ def _search_reddit(
                 from_date,
                 to_date,
                 depth=depth,
+                auth_source=config.get("OPENAI_AUTH_SOURCE", "api_key"),
+                account_id=config.get("OPENAI_CHATGPT_ACCOUNT_ID"),
             )
         except http.HTTPError as e:
             raw_openai = {"error": str(e)}
@@ -103,6 +101,8 @@ def _search_reddit(
                     core,
                     from_date, to_date,
                     depth=depth,
+                    auth_source=config.get("OPENAI_AUTH_SOURCE", "api_key"),
+                    account_id=config.get("OPENAI_CHATGPT_ACCOUNT_ID"),
                 )
                 retry_items = openai_reddit.parse_reddit_response(retry_raw)
                 # Add items not already found (by URL)

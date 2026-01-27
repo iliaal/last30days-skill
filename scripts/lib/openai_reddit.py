@@ -5,7 +5,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import http
+from . import http, env
 
 
 def _log_error(msg: str):
@@ -14,6 +14,93 @@ def _log_error(msg: str):
     sys.stderr.flush()
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
+CODEX_INSTRUCTIONS = (
+    "You are a research assistant for a skill that summarizes what people are "
+    "discussing in the last 30 days. Your goal is to find relevant Reddit threads "
+    "about the topic and return ONLY the required JSON. Be inclusive (return more "
+    "rather than fewer), but avoid irrelevant results. Prefer threads with discussion "
+    "and comments. If you can infer a date, include it; otherwise use null. "
+    "Do not include developers.reddit.com or business.reddit.com."
+)
+
+
+def _parse_sse_chunk(chunk: str) -> Optional[Dict[str, Any]]:
+    """Parse a single SSE chunk into a JSON object."""
+    lines = chunk.split("\n")
+    data_lines = []
+
+    for line in lines:
+        if line.startswith("data:"):
+            data_lines.append(line[5:].strip())
+
+    if not data_lines:
+        return None
+
+    data = "\n".join(data_lines).strip()
+    if not data or data == "[DONE]":
+        return None
+
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError:
+        return None
+
+
+def _parse_sse_stream_raw(raw: str) -> List[Dict[str, Any]]:
+    """Parse SSE stream from raw text and return JSON events."""
+    events: List[Dict[str, Any]] = []
+    buffer = ""
+    for chunk in raw.splitlines(keepends=True):
+        buffer += chunk
+        while "\n\n" in buffer:
+            event_chunk, buffer = buffer.split("\n\n", 1)
+            event = _parse_sse_chunk(event_chunk)
+            if event is not None:
+                events.append(event)
+    if buffer.strip():
+        event = _parse_sse_chunk(buffer)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _parse_codex_stream(raw: str) -> Dict[str, Any]:
+    """Parse SSE stream from Codex responses into a response-like dict."""
+    events = _parse_sse_stream_raw(raw)
+
+    # Prefer explicit completed response payload if present
+    for evt in reversed(events):
+        if isinstance(evt, dict):
+            if evt.get("type") == "response.completed" and isinstance(evt.get("response"), dict):
+                return evt["response"]
+            if isinstance(evt.get("response"), dict):
+                return evt["response"]
+
+    # Fallback: reconstruct output text from deltas
+    output_text = ""
+    for evt in events:
+        if not isinstance(evt, dict):
+            continue
+        delta = evt.get("delta")
+        if isinstance(delta, str):
+            output_text += delta
+            continue
+        text = evt.get("text")
+        if isinstance(text, str):
+            output_text += text
+
+    if output_text:
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": output_text}],
+                }
+            ]
+        }
+
+    return {}
 
 # Depth configurations: (min, max) threads to request
 # Request MORE than needed since many get filtered by date
@@ -76,6 +163,35 @@ def _extract_core_subject(topic: str) -> str:
     return ' '.join(result[:3]) or topic  # Keep max 3 words
 
 
+def _build_payload(model: str, instructions_text: str, input_text: str, auth_source: str) -> Dict[str, Any]:
+    """Build responses payload for OpenAI or Codex endpoints."""
+    payload = {
+        "model": model,
+        "store": False,
+        "tools": [
+            {
+                "type": "web_search",
+                "filters": {
+                    "allowed_domains": ["reddit.com"]
+                }
+            }
+        ],
+        "include": ["web_search_call.action.sources"],
+        "instructions": instructions_text,
+        "input": input_text,
+    }
+    if auth_source == env.AUTH_SOURCE_CODEX:
+        payload["input"] = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": input_text}],
+            }
+        ]
+        payload["stream"] = True
+    return payload
+
+
 def search_reddit(
     api_key: str,
     model: str,
@@ -83,6 +199,8 @@ def search_reddit(
     from_date: str,
     to_date: str,
     depth: str = "default",
+    auth_source: str = "api_key",
+    account_id: Optional[str] = None,
     mock_response: Optional[Dict] = None,
     _retry: bool = False,
 ) -> Dict[str, Any]:
@@ -105,37 +223,49 @@ def search_reddit(
 
     min_items, max_items = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    if auth_source == env.AUTH_SOURCE_CODEX:
+        if not account_id:
+            raise ValueError("Missing chatgpt_account_id for Codex auth")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "chatgpt-account-id": account_id,
+            "OpenAI-Beta": "responses=experimental",
+            "originator": "pi",
+            "Content-Type": "application/json",
+        }
+        url = CODEX_RESPONSES_URL
+    else:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        url = OPENAI_RESPONSES_URL
 
     # Adjust timeout based on depth (generous for OpenAI web_search which can be slow)
     timeout = 90 if depth == "quick" else 120 if depth == "default" else 180
 
     # Note: allowed_domains accepts base domain, not subdomains
     # We rely on prompt to filter out developers.reddit.com, etc.
-    payload = {
-        "model": model,
-        "tools": [
-            {
-                "type": "web_search",
-                "filters": {
-                    "allowed_domains": ["reddit.com"]
-                }
-            }
-        ],
-        "include": ["web_search_call.action.sources"],
-        "input": REDDIT_SEARCH_PROMPT.format(
+    instructions_text = (
+        CODEX_INSTRUCTIONS
+        + "\n\n"
+        + REDDIT_SEARCH_PROMPT.format(
             topic=topic,
             from_date=from_date,
             to_date=to_date,
             min_items=min_items,
             max_items=max_items,
-        ),
-    }
+        )
+    )
+    input_text = topic
+    payload = _build_payload(model, instructions_text, input_text, auth_source)
 
-    return http.post(OPENAI_RESPONSES_URL, payload, headers=headers, timeout=timeout)
+    if auth_source == env.AUTH_SOURCE_CODEX:
+        raw = http.post_raw(url, payload, headers=headers, timeout=timeout)
+        response = _parse_codex_stream(raw or "")
+    else:
+        response = http.post(url, payload, headers=headers, timeout=timeout)
+    return response
 
 
 def parse_reddit_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:

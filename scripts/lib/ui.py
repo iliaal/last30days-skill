@@ -1,6 +1,5 @@
 """Terminal UI utilities for last30days skill."""
 
-import os
 import sys
 import time
 import threading
@@ -84,15 +83,16 @@ PROMO_MESSAGE = f"""
 {Colors.YELLOW}{Colors.BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.RESET}
 {Colors.YELLOW}⚡ UNLOCK THE FULL POWER OF /last30days{Colors.RESET}
 
-{Colors.DIM}Right now you're using web search only. Add API keys to unlock:{Colors.RESET}
+{Colors.DIM}Right now you're using web search only. To unlock Reddit, either add a key or sign in to Codex:{Colors.RESET}
 
   {Colors.YELLOW}🟠 Reddit{Colors.RESET} - Real upvotes, comments, and community insights
-     └─ Add OPENAI_API_KEY (uses OpenAI's web_search for Reddit)
+     └─ Add OPENAI_API_KEY or run {Colors.BOLD}codex login{Colors.RESET} (uses your Codex auth)
 
   {Colors.CYAN}🔵 X (Twitter){Colors.RESET} - Real-time posts, likes, reposts from creators
      └─ Add XAI_API_KEY (uses xAI's live X search)
 
 {Colors.DIM}Setup:{Colors.RESET} Edit {Colors.BOLD}~/.config/last30days/.env{Colors.RESET}
+{Colors.DIM}If you're already signed in but still seeing this, re-run{Colors.RESET} {Colors.BOLD}codex login{Colors.RESET}
 {Colors.YELLOW}{Colors.BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.RESET}
 """
 
@@ -100,22 +100,23 @@ PROMO_MESSAGE_PLAIN = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ UNLOCK THE FULL POWER OF /last30days
 
-Right now you're using web search only. Add API keys to unlock:
+Right now you're using web search only. To unlock Reddit, either add a key or sign in to Codex:
 
   🟠 Reddit - Real upvotes, comments, and community insights
-     └─ Add OPENAI_API_KEY (uses OpenAI's web_search for Reddit)
+     └─ Add OPENAI_API_KEY or run codex login (uses your Codex auth)
 
   🔵 X (Twitter) - Real-time posts, likes, reposts from creators
      └─ Add XAI_API_KEY (uses xAI's live X search)
 
 Setup: Edit ~/.config/last30days/.env
+If you're already signed in but still seeing this, re-run codex login
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 # Shorter promo for single missing key
 PROMO_SINGLE_KEY = {
     "reddit": f"""
-{Colors.DIM}💡 Tip: Add {Colors.YELLOW}OPENAI_API_KEY{Colors.RESET}{Colors.DIM} to ~/.config/last30days/.env for Reddit data with real engagement metrics!{Colors.RESET}
+{Colors.DIM}💡 Tip: Add {Colors.YELLOW}OPENAI_API_KEY{Colors.RESET}{Colors.DIM} or run {Colors.BOLD}codex login{Colors.RESET}{Colors.DIM} for Reddit data with real engagement metrics. If already signed in, re-run {Colors.BOLD}codex login{Colors.RESET}{Colors.DIM}.{Colors.RESET}
 """,
     "x": f"""
 {Colors.DIM}💡 Tip: Add {Colors.CYAN}XAI_API_KEY{Colors.RESET}{Colors.DIM} to ~/.config/last30days/.env for X/Twitter data with real likes & reposts!{Colors.RESET}
@@ -123,7 +124,7 @@ PROMO_SINGLE_KEY = {
 }
 
 PROMO_SINGLE_KEY_PLAIN = {
-    "reddit": "\n💡 Tip: Add OPENAI_API_KEY to ~/.config/last30days/.env for Reddit data with real engagement metrics!\n",
+    "reddit": "\n💡 Tip: Add OPENAI_API_KEY or run codex login for Reddit data with real engagement metrics. If already signed in, re-run codex login.\n",
     "x": "\n💡 Tip: Add XAI_API_KEY to ~/.config/last30days/.env for X/Twitter data with real likes & reposts!\n",
 }
 
