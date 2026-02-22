@@ -38,9 +38,9 @@ _child_pids: set = set()
 _child_pids_lock = threading.Lock()
 
 TIMEOUT_PROFILES = {
-    "quick":   {"global": 90,  "future": 30, "reddit_future": 60,  "youtube_future": 60,  "http": 15, "enrich_per": 8,  "enrich_total": 30, "enrich_max_items": 10},
-    "default": {"global": 180, "future": 60, "reddit_future": 90,  "youtube_future": 90,  "http": 30, "enrich_per": 15, "enrich_total": 45, "enrich_max_items": 15},
-    "deep":    {"global": 300, "future": 90, "reddit_future": 120, "youtube_future": 120, "http": 30, "enrich_per": 15, "enrich_total": 60, "enrich_max_items": 25},
+    "quick":   {"global": 120, "future": 30, "reddit_future": 90,  "youtube_future": 60,  "http": 15, "enrich_per": 8,  "enrich_total": 30, "enrich_max_items": 10},
+    "default": {"global": 240, "future": 60, "reddit_future": 150, "youtube_future": 90,  "http": 30, "enrich_per": 15, "enrich_total": 45, "enrich_max_items": 15},
+    "deep":    {"global": 360, "future": 90, "reddit_future": 180, "youtube_future": 120, "http": 30, "enrich_per": 15, "enrich_total": 60, "enrich_max_items": 25},
 }
 
 
@@ -627,7 +627,7 @@ def run_research(
             except Exception as e:
                 reddit_error = f"{type(e).__name__}: {e}"
                 if progress:
-                    progress.show_error(f"Reddit error: {e}")
+                    progress.show_error(f"Reddit error: {reddit_error}")
             if progress:
                 progress.end_reddit(len(reddit_items))
 
@@ -862,6 +862,10 @@ def main():
 
     # Load config
     config = env.get_config()
+
+    # Inject .env credentials into Bird module before auth check (if available)
+    if hasattr(bird_x, 'set_credentials'):
+        bird_x.set_credentials(config.get('AUTH_TOKEN'), config.get('CT0'))
 
     # Auto-detect Bird (no prompts - just use it if available)
     x_source_status = env.get_x_source_status(config)
