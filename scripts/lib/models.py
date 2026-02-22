@@ -8,6 +8,7 @@ from . import cache, http, env
 # OpenAI API
 OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
 OPENAI_FALLBACK_MODELS = ["gpt-5.2", "gpt-5.1", "gpt-5", "gpt-4.1", "gpt-4o"]
+CODEX_FALLBACK_MODELS = ["gpt-5.1-codex-mini", "gpt-5.2"]
 
 # xAI API - Agent Tools API requires grok-4 family
 XAI_MODELS_URL = "https://api.x.ai/v1/models"
@@ -164,7 +165,7 @@ def get_models(
             if policy == "pinned" and pin:
                 result["openai"] = pin
             else:
-                result["openai"] = OPENAI_FALLBACK_MODELS[0]
+                result["openai"] = CODEX_FALLBACK_MODELS[0]
         else:
             result["openai"] = select_openai_model(
                 config["OPENAI_API_KEY"],

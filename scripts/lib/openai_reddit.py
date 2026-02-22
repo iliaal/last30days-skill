@@ -298,11 +298,25 @@ def search_reddit(
     )
 
     if auth_source == env.AUTH_SOURCE_CODEX:
-        # Codex auth: use _build_payload with instructions and stream
+        # Codex auth: try model with fallback chain
+        from . import models as models_mod
+        codex_models_to_try = [model] + [m for m in models_mod.CODEX_FALLBACK_MODELS if m != model]
         instructions_text = CODEX_INSTRUCTIONS + "\n\n" + input_text
-        payload = _build_payload(model, instructions_text, topic, auth_source)
-        raw = http.post_raw(url, payload, headers=headers, timeout=timeout)
-        return _parse_codex_stream(raw or "")
+        last_error = None
+        for current_model in codex_models_to_try:
+            try:
+                payload = _build_payload(current_model, instructions_text, topic, auth_source)
+                raw = http.post_raw(url, payload, headers=headers, timeout=timeout)
+                return _parse_codex_stream(raw or "")
+            except http.HTTPError as e:
+                last_error = e
+                if e.status_code == 400:
+                    _log_info(f"Model {current_model} not supported on Codex, trying fallback...")
+                    continue
+                raise
+        if last_error:
+            raise last_error
+        raise http.HTTPError("No Codex-compatible models available")
 
     # Standard API key auth: try model fallback chain
     last_error = None
