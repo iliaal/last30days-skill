@@ -1,9 +1,12 @@
 """Environment and API key management for last30days skill."""
 
+import base64
 import json
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
 # Allow override via environment variable for testing
 # Set LAST30DAYS_CONFIG_DIR="" for clean/no-config mode
@@ -19,6 +22,29 @@ elif _config_override:
 else:
     CONFIG_DIR = Path.home() / ".config" / "last30days"
     CONFIG_FILE = CONFIG_DIR / ".env"
+
+CODEX_AUTH_FILE = Path(os.environ.get("CODEX_AUTH_FILE", str(Path.home() / ".codex" / "auth.json")))
+
+AuthSource = Literal["api_key", "codex", "none"]
+AuthStatus = Literal["ok", "missing", "expired", "missing_account_id"]
+
+AUTH_SOURCE_API_KEY: AuthSource = "api_key"
+AUTH_SOURCE_CODEX: AuthSource = "codex"
+AUTH_SOURCE_NONE: AuthSource = "none"
+
+AUTH_STATUS_OK: AuthStatus = "ok"
+AUTH_STATUS_MISSING: AuthStatus = "missing"
+AUTH_STATUS_EXPIRED: AuthStatus = "expired"
+AUTH_STATUS_MISSING_ACCOUNT_ID: AuthStatus = "missing_account_id"
+
+
+@dataclass(frozen=True)
+class OpenAIAuth:
+    token: Optional[str]
+    source: AuthSource
+    status: AuthStatus
+    account_id: Optional[str]
+    codex_auth_file: str
 
 
 def load_env_file(path: Path) -> Dict[str, str]:
@@ -44,14 +70,131 @@ def load_env_file(path: Path) -> Dict[str, str]:
     return env
 
 
+def _decode_jwt_payload(token: str) -> Optional[Dict[str, Any]]:
+    """Decode JWT payload without verification."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload_b64 = parts[1]
+        pad = "=" * (-len(payload_b64) % 4)
+        decoded = base64.urlsafe_b64decode(payload_b64 + pad)
+        return json.loads(decoded.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _token_expired(token: str, leeway_seconds: int = 60) -> bool:
+    """Check if JWT token is expired."""
+    payload = _decode_jwt_payload(token)
+    if not payload:
+        return False
+    exp = payload.get("exp")
+    if not exp:
+        return False
+    return exp <= (time.time() + leeway_seconds)
+
+
+def extract_chatgpt_account_id(access_token: str) -> Optional[str]:
+    """Extract chatgpt_account_id from JWT token."""
+    payload = _decode_jwt_payload(access_token)
+    if not payload:
+        return None
+    auth_claim = payload.get("https://api.openai.com/auth", {})
+    if isinstance(auth_claim, dict):
+        return auth_claim.get("chatgpt_account_id")
+    return None
+
+
+def load_codex_auth(path: Path = CODEX_AUTH_FILE) -> Dict[str, Any]:
+    """Load Codex auth JSON."""
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def get_codex_access_token() -> tuple[Optional[str], str]:
+    """Get Codex access token from auth.json.
+
+    Returns:
+        (token, status) where status is 'ok', 'missing', or 'expired'
+    """
+    auth = load_codex_auth()
+    token = None
+    if isinstance(auth, dict):
+        tokens = auth.get("tokens") or {}
+        if isinstance(tokens, dict):
+            token = tokens.get("access_token")
+        if not token:
+            token = auth.get("access_token")
+    if not token:
+        return None, AUTH_STATUS_MISSING
+    if _token_expired(token):
+        return None, AUTH_STATUS_EXPIRED
+    return token, AUTH_STATUS_OK
+
+
+def get_openai_auth(file_env: Dict[str, str]) -> OpenAIAuth:
+    """Resolve OpenAI auth from API key or Codex login."""
+    api_key = os.environ.get('OPENAI_API_KEY') or file_env.get('OPENAI_API_KEY')
+    if api_key:
+        return OpenAIAuth(
+            token=api_key,
+            source=AUTH_SOURCE_API_KEY,
+            status=AUTH_STATUS_OK,
+            account_id=None,
+            codex_auth_file=str(CODEX_AUTH_FILE),
+        )
+
+    codex_token, codex_status = get_codex_access_token()
+    if codex_token:
+        account_id = extract_chatgpt_account_id(codex_token)
+        if account_id:
+            return OpenAIAuth(
+                token=codex_token,
+                source=AUTH_SOURCE_CODEX,
+                status=AUTH_STATUS_OK,
+                account_id=account_id,
+                codex_auth_file=str(CODEX_AUTH_FILE),
+            )
+        return OpenAIAuth(
+            token=None,
+            source=AUTH_SOURCE_CODEX,
+            status=AUTH_STATUS_MISSING_ACCOUNT_ID,
+            account_id=None,
+            codex_auth_file=str(CODEX_AUTH_FILE),
+        )
+
+    return OpenAIAuth(
+        token=None,
+        source=AUTH_SOURCE_NONE,
+        status=codex_status,
+        account_id=None,
+        codex_auth_file=str(CODEX_AUTH_FILE),
+    )
+
+
 def get_config() -> Dict[str, Any]:
     """Load configuration from ~/.config/last30days/.env and environment."""
     # Load from config file first (if configured)
     file_env = load_env_file(CONFIG_FILE) if CONFIG_FILE else {}
 
-    # Build config: process.env > .env file
+    openai_auth = get_openai_auth(file_env)
+
+    # Build config: Codex/OpenAI auth + process.env > .env file
+    config = {
+        'OPENAI_API_KEY': openai_auth.token,
+        'OPENAI_AUTH_SOURCE': openai_auth.source,
+        'OPENAI_AUTH_STATUS': openai_auth.status,
+        'OPENAI_CHATGPT_ACCOUNT_ID': openai_auth.account_id,
+        'CODEX_AUTH_FILE': openai_auth.codex_auth_file,
+    }
+
     keys = [
-        ('OPENAI_API_KEY', None),
         ('XAI_API_KEY', None),
         ('OPENROUTER_API_KEY', None),
         ('PARALLEL_API_KEY', None),
@@ -62,7 +205,6 @@ def get_config() -> Dict[str, Any]:
         ('XAI_MODEL_PIN', None),
     ]
 
-    config = {}
     for key, default in keys:
         config[key] = os.environ.get(key) or file_env.get(key, default)
 
@@ -79,7 +221,7 @@ def get_available_sources(config: Dict[str, Any]) -> str:
 
     Returns: 'all', 'both', 'reddit', 'reddit-web', 'x', 'x-web', 'web', or 'none'
     """
-    has_openai = bool(config.get('OPENAI_API_KEY'))
+    has_openai = bool(config.get('OPENAI_API_KEY')) and config.get('OPENAI_AUTH_STATUS') == AUTH_STATUS_OK
     has_xai = bool(config.get('XAI_API_KEY'))
     has_web = has_web_search_keys(config)
 
@@ -121,7 +263,7 @@ def get_missing_keys(config: Dict[str, Any]) -> str:
 
     Returns: 'all', 'both', 'reddit', 'x', 'web', or 'none'
     """
-    has_openai = bool(config.get('OPENAI_API_KEY'))
+    has_openai = bool(config.get('OPENAI_API_KEY')) and config.get('OPENAI_AUTH_STATUS') == AUTH_STATUS_OK
     has_xai = bool(config.get('XAI_API_KEY'))
     has_web = has_web_search_keys(config)
 
@@ -170,7 +312,7 @@ def validate_sources(requested: str, available: str, include_web: bool = False) 
         elif requested == 'web':
             return 'web', None
         else:
-            return 'web', f"Only web search keys configured. Add OPENAI_API_KEY for Reddit, XAI_API_KEY for X."
+            return 'web', "Only web search keys configured. Add OPENAI_API_KEY (or run codex login) for Reddit, XAI_API_KEY for X."
 
     if requested == 'auto':
         # Add web to sources if include_web is set

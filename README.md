@@ -22,14 +22,16 @@
 # Clone the repo
 git clone https://github.com/mvanhorn/last30days-skill.git ~/.claude/skills/last30days
 
-# Add your API keys
+# Add your API keys (optional if signed in to Codex)
 mkdir -p ~/.config/last30days
 cat > ~/.config/last30days/.env << 'EOF'
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=sk-...   # optional if using `codex login`
 XAI_API_KEY=xai-...       # optional  - cookie auth is default for X search
 EOF
 chmod 600 ~/.config/last30days/.env
 ```
+
+If you're signed in to Codex (`codex login`), the skill will use your Codex credentials for the OpenAI Responses API and you can omit `OPENAI_API_KEY`. If you're not signed in, run `codex login` first.
 
 ### X Search Authentication
 

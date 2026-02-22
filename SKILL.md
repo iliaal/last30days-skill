@@ -86,6 +86,8 @@ This text MUST appear before you call any tools. It confirms to the user that yo
 
 **CRITICAL: Run this command in the FOREGROUND with a 5-minute timeout. Do NOT use run_in_background. The full output contains Reddit, X, AND YouTube data that you need to read completely.**
 
+**IMPORTANT: The script handles API key/Codex auth detection automatically.** Run it and check the output to determine mode.
+
 ```bash
 # Find skill root — works in repo checkout, Claude Code, or Codex install
 for dir in \

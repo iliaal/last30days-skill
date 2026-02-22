@@ -1,6 +1,5 @@
 """Terminal UI utilities for last30days skill."""
 
-import os
 import sys
 import time
 import threading
@@ -103,7 +102,7 @@ I just researched that for you. Here's what I've got right now:
 
 {status_line}
 
-You can unlock more sources with API keys — just ask me how and I'll walk you through it. More sources means better research, but it works fine as-is.
+You can unlock more sources with API keys or by signing in to Codex — just ask me how and I'll walk you through it. More sources means better research, but it works fine as-is.
 
 Some examples of what you can do:
 - "last30 what are people saying about Figma"
@@ -117,7 +116,7 @@ Just start with "last30" and talk to me like normal.
 
 # Shorter promo for single missing key
 PROMO_SINGLE_KEY = {
-    "reddit": "\n💡 You can unlock Reddit with an OpenAI API key — just ask me how.\n",
+    "reddit": "\n💡 You can unlock Reddit with an OpenAI API key or by running `codex login` — just ask me how.\n",
     "x": "\n💡 You can unlock X with an xAI API key — just ask me how.\n",
 }
 
