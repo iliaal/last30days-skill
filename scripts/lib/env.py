@@ -203,6 +203,8 @@ def get_config() -> Dict[str, Any]:
         ('OPENAI_MODEL_PIN', None),
         ('XAI_MODEL_POLICY', 'latest'),
         ('XAI_MODEL_PIN', None),
+        ('AUTH_TOKEN', None),
+        ('CT0', None),
     ]
 
     for key, default in keys:
