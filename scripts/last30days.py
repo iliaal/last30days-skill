@@ -863,9 +863,8 @@ def main():
     # Load config
     config = env.get_config()
 
-    # Inject .env credentials into Bird module before auth check (if available)
-    if hasattr(bird_x, 'set_credentials'):
-        bird_x.set_credentials(config.get('AUTH_TOKEN'), config.get('CT0'))
+    # Inject .env credentials into Bird module before auth check
+    bird_x.set_credentials(config.get('AUTH_TOKEN'), config.get('CT0'))
 
     # Auto-detect Bird (no prompts - just use it if available)
     x_source_status = env.get_x_source_status(config)

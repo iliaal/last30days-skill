@@ -24,6 +24,24 @@ DEPTH_CONFIG = {
     "deep": 60,
 }
 
+# Module-level credentials injected from .env config
+_credentials: Dict[str, str] = {}
+
+
+def set_credentials(auth_token: Optional[str], ct0: Optional[str]):
+    """Inject AUTH_TOKEN/CT0 from .env config so Node subprocesses can use them."""
+    if auth_token:
+        _credentials['AUTH_TOKEN'] = auth_token
+    if ct0:
+        _credentials['CT0'] = ct0
+
+
+def _subprocess_env() -> Dict[str, str]:
+    """Build env dict for Node subprocesses, merging injected credentials."""
+    env = os.environ.copy()
+    env.update(_credentials)
+    return env
+
 
 def _log(msg: str):
     """Log to stderr."""
@@ -112,6 +130,7 @@ def is_bird_authenticated() -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=15,
+            env=_subprocess_env(),
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().split('\n')[0]
@@ -187,6 +206,7 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
             stderr=subprocess.PIPE,
             text=True,
             preexec_fn=preexec,
+            env=_subprocess_env(),
         )
 
         # Register for cleanup tracking (if available)
