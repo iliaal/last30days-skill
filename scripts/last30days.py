@@ -38,10 +38,44 @@ _child_pids: set = set()
 _child_pids_lock = threading.Lock()
 
 TIMEOUT_PROFILES = {
-    "quick":   {"global": 120, "future": 30, "reddit_future": 90,  "youtube_future": 60,  "http": 15, "enrich_per": 8,  "enrich_total": 30, "enrich_max_items": 10},
-    "default": {"global": 240, "future": 60, "reddit_future": 150, "youtube_future": 90,  "http": 30, "enrich_per": 15, "enrich_total": 45, "enrich_max_items": 15},
-    "deep":    {"global": 360, "future": 90, "reddit_future": 180, "youtube_future": 120, "http": 30, "enrich_per": 15, "enrich_total": 60, "enrich_max_items": 25},
+    "quick":   {"global": 90,  "future": 30, "reddit_future": 60,  "youtube_future": 60,  "tiktok_future": 90,   "hackernews_future": 30,  "polymarket_future": 15,  "http": 15, "enrich_per": 8,  "enrich_total": 30, "enrich_max_items": 10},
+    "default": {"global": 180, "future": 60, "reddit_future": 90,  "youtube_future": 90,  "tiktok_future": 120,  "hackernews_future": 60,  "polymarket_future": 30,  "http": 30, "enrich_per": 15, "enrich_total": 45, "enrich_max_items": 15},
+    "deep":    {"global": 300, "future": 90, "reddit_future": 120, "youtube_future": 120, "tiktok_future": 150,  "hackernews_future": 90,  "polymarket_future": 45,  "http": 30, "enrich_per": 15, "enrich_total": 60, "enrich_max_items": 25},
 }
+
+# Valid source names for the --search flag
+VALID_SEARCH_SOURCES = {"reddit", "x", "hn", "youtube", "tiktok", "polymarket", "web"}
+
+
+def parse_search_flag(search_str: str) -> set:
+    """Parse and validate the --search flag value.
+
+    Args:
+        search_str: Comma-separated source names (e.g. "reddit,hn")
+
+    Returns:
+        Set of validated source names
+
+    Raises:
+        SystemExit: If invalid sources are specified
+    """
+    sources = set()
+    for s in search_str.split(","):
+        s = s.strip().lower()
+        if not s:
+            continue
+        if s not in VALID_SEARCH_SOURCES:
+            print(
+                f"Error: Unknown search source '{s}'. "
+                f"Valid: {', '.join(sorted(VALID_SEARCH_SOURCES))}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        sources.add(s)
+    if not sources:
+        print("Error: --search requires at least one source.", file=sys.stderr)
+        sys.exit(1)
+    return sources
 
 
 def register_child_pid(pid: int):
@@ -98,6 +132,8 @@ from lib import (
     bird_x,
     dates,
     dedupe,
+    hackernews,
+    polymarket,
     entity_extract,
     env,
     http,
@@ -109,6 +145,8 @@ from lib import (
     schema,
     score,
     ui,
+    tiktok,
+    websearch,
     xai_x,
     youtube_yt,
 )
@@ -306,6 +344,91 @@ def _search_youtube(
     return youtube_items, youtube_error
 
 
+def _search_tiktok(
+    topic: str,
+    from_date: str,
+    to_date: str,
+    depth: str,
+    token: str,
+) -> tuple:
+    """Search TikTok via Apify (runs in thread).
+
+    Returns:
+        Tuple of (tiktok_items, tiktok_error)
+    """
+    tiktok_error = None
+
+    try:
+        response = tiktok.search_and_enrich(
+            topic, from_date, to_date, depth=depth, token=token,
+        )
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
+
+    tiktok_items = tiktok.parse_tiktok_response(response)
+
+    if response.get("error"):
+        tiktok_error = response["error"]
+
+    return tiktok_items, tiktok_error
+
+
+def _search_hackernews(
+    topic: str,
+    from_date: str,
+    to_date: str,
+    depth: str,
+) -> tuple:
+    """Search Hacker News via Algolia (runs in thread).
+
+    Returns:
+        Tuple of (hn_items, hn_error)
+    """
+    hn_error = None
+
+    try:
+        response = hackernews.search_hackernews(
+            topic, from_date, to_date, depth=depth,
+        )
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
+
+    hn_items = hackernews.parse_hackernews_response(response)
+
+    if response.get("error"):
+        hn_error = response["error"]
+
+    return hn_items, hn_error
+
+
+def _search_polymarket(
+    topic: str,
+    from_date: str,
+    to_date: str,
+    depth: str,
+) -> tuple:
+    """Search Polymarket via Gamma API (runs in thread).
+
+    Returns:
+        Tuple of (pm_items, pm_error)
+    """
+    pm_error = None
+
+    try:
+        response = polymarket.search_polymarket(
+            topic, from_date, to_date, depth=depth,
+        )
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
+
+    pm_items = polymarket.parse_polymarket_response(response, topic=topic)
+
+    if response.get("error"):
+        pm_error = response["error"]
+
+    return pm_items, pm_error
+
+
 def _search_web(
     topic: str,
     config: dict,
@@ -368,6 +491,7 @@ def _run_supplemental(
     x_source: str,
     progress: ui.ProgressDisplay = None,
     skip_reddit: bool = False,
+    resolved_handle: str = None,
 ) -> tuple:
     """Run Phase 2 supplemental searches based on entities from Phase 1.
 
@@ -384,6 +508,7 @@ def _run_supplemental(
         x_source: 'bird' or 'xai'
         progress: Optional progress display
         skip_reddit: If True, skip Reddit supplemental (e.g. rate-limited)
+        resolved_handle: X handle resolved by the agent (without @), searched unfiltered
 
     Returns:
         Tuple of (supplemental_reddit, supplemental_x)
@@ -408,10 +533,19 @@ def _run_supplemental(
     has_handles = entities["x_handles"] and x_source == "bird"
     has_subs = entities["reddit_subreddits"] and not skip_reddit
 
-    if not has_handles and not has_subs:
+    # Always run unfiltered search for resolved handle (even if entity-extracted).
+    # Entity-extracted handles get topic-filtered queries (from:handle topic),
+    # but resolved handles need UNFILTERED search (from:handle) to find posts
+    # that don't mention the topic string (e.g. Dor Brothers' viral tweet about
+    # Logan Paul doesn't contain "dor brothers" in the text).
+    has_resolved = bool(resolved_handle) and x_source == "bird"
+
+    if not has_handles and not has_subs and not has_resolved:
         return [], []
 
     parts = []
+    if has_resolved:
+        parts.append(f"@{resolved_handle} (resolved)")
     if has_handles:
         parts.append(f"@{', @'.join(entities['x_handles'][:3])}")
     if has_subs:
@@ -432,8 +566,10 @@ def _run_supplemental(
     # Run supplemental searches in parallel
     reddit_future = None
     x_future = None
+    resolved_future = None
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    max_workers = sum([bool(has_subs), bool(has_handles), bool(has_resolved)])
+    with ThreadPoolExecutor(max_workers=max(max_workers, 1)) as executor:
         if has_subs:
             reddit_future = executor.submit(
                 openai_reddit.search_subreddits,
@@ -451,6 +587,16 @@ def _run_supplemental(
                 topic,
                 from_date,
                 count_per,
+            )
+
+        if has_resolved:
+            # Resolved handle: search unfiltered (topic=None) to get all recent posts
+            resolved_future = executor.submit(
+                bird_x.search_handles,
+                [resolved_handle],
+                None,  # No topic filter - get all recent activity
+                from_date,
+                10,  # More results for the topic entity
             )
 
         if reddit_future:
@@ -478,6 +624,24 @@ def _run_supplemental(
             except Exception as e:
                 sys.stderr.write(f"[Phase 2] Supplemental X error: {e}\n")
 
+        if resolved_future:
+            try:
+                raw_resolved = resolved_future.result(timeout=30)
+                # Lower relevance for unfiltered handle posts (no topic keyword signal)
+                for item in raw_resolved:
+                    item["relevance"] = 0.5
+                resolved_new = [
+                    item for item in raw_resolved
+                    if item.get("url", "") not in existing_urls
+                ]
+                supplemental_x.extend(resolved_new)
+                if resolved_new:
+                    sys.stderr.write(f"[Phase 2] +{len(resolved_new)} from @{resolved_handle}\n")
+            except TimeoutError:
+                sys.stderr.write(f"[Phase 2] Resolved handle @{resolved_handle} timed out (30s)\n")
+            except Exception as e:
+                sys.stderr.write(f"[Phase 2] Resolved handle error: {e}\n")
+
     if supplemental_reddit or supplemental_x:
         sys.stderr.write(
             f"[Phase 2] +{len(supplemental_reddit)} Reddit, +{len(supplemental_x)} X\n"
@@ -499,14 +663,19 @@ def run_research(
     progress: ui.ProgressDisplay = None,
     x_source: str = "xai",
     run_youtube: bool = False,
+    run_tiktok: bool = False,
     timeouts: dict = None,
+    resolved_handle: str = None,
+    do_hackernews: bool = True,
+    do_polymarket: bool = True,
+    no_native_web: bool = False,
 ) -> tuple:
     """Run the research pipeline.
 
     Returns:
-        Tuple of (reddit_items, x_items, youtube_items, web_items, web_needed,
+        Tuple of (reddit_items, x_items, youtube_items, tiktok_items, web_items, web_needed,
                   raw_openai, raw_xai, raw_reddit_enriched,
-                  reddit_error, x_error, youtube_error, web_error)
+                  reddit_error, x_error, youtube_error, tiktok_error, web_error)
 
     Note: web_needed is True when web search should be performed by the assistant
     (i.e., no native web search API keys are configured). When native web search
@@ -519,6 +688,9 @@ def run_research(
     reddit_items = []
     x_items = []
     youtube_items = []
+    tiktok_items = []
+    hackernews_items = []
+    polymarket_items = []
     web_items = []
     raw_openai = None
     raw_xai = None
@@ -526,11 +698,14 @@ def run_research(
     reddit_error = None
     x_error = None
     youtube_error = None
+    tiktok_error = None
+    hackernews_error = None
+    polymarket_error = None
     web_error = None
 
     # Determine web search mode
     do_web = sources in ("all", "web", "reddit-web", "x-web")
-    web_backend = env.get_web_search_source(config) if do_web else None
+    web_backend = env.get_web_search_source(config) if (do_web and not no_native_web) else None
     web_needed = do_web and not web_backend
 
     # Web-only mode
@@ -568,18 +743,23 @@ def run_research(
                     progress.show_error(f"YouTube error: {e}")
             if progress:
                 progress.end_youtube(len(youtube_items))
-        return reddit_items, x_items, youtube_items, web_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error, youtube_error, web_error
+        return reddit_items, x_items, youtube_items, tiktok_items, hackernews_items, polymarket_items, web_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error, youtube_error, tiktok_error, hackernews_error, polymarket_error, web_error
 
     # Determine which searches to run
     do_reddit = sources in ("both", "reddit", "all", "reddit-web")
     do_x = sources in ("both", "x", "all", "x-web")
+    # do_hackernews / do_polymarket are always True by default, but can be
+    # restricted via the --search flag to run a focused source subset.
 
-    # Run Reddit, X, YouTube, and Web searches in parallel
+    # Run Reddit, X, YouTube, HN, Polymarket, and Web searches in parallel
     reddit_future = None
     x_future = None
     youtube_future = None
+    tiktok_future = None
+    hackernews_future = None
+    polymarket_future = None
     web_future = None
-    max_workers = 2 + (1 if run_youtube else 0) + (1 if web_backend else 0)
+    max_workers = 2 + (1 if run_youtube else 0) + (1 if run_tiktok else 0) + (1 if do_hackernews else 0) + (1 if do_polymarket else 0) + (1 if web_backend else 0)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit searches
@@ -604,6 +784,28 @@ def run_research(
                 progress.start_youtube()
             youtube_future = executor.submit(
                 _search_youtube, topic, from_date, to_date, depth
+            )
+
+        if run_tiktok:
+            if progress:
+                progress.start_tiktok()
+            tiktok_future = executor.submit(
+                _search_tiktok, topic, from_date, to_date, depth,
+                config.get('APIFY_API_TOKEN', ''),
+            )
+
+        if do_hackernews:
+            if progress:
+                progress.start_hackernews()
+            hackernews_future = executor.submit(
+                _search_hackernews, topic, from_date, to_date, depth
+            )
+
+        if do_polymarket:
+            if progress:
+                progress.start_polymarket()
+            polymarket_future = executor.submit(
+                _search_polymarket, topic, from_date, to_date, depth
             )
 
         if web_backend:
@@ -663,6 +865,57 @@ def run_research(
                     progress.show_error(f"YouTube error: {e}")
             if progress:
                 progress.end_youtube(len(youtube_items))
+
+        if tiktok_future:
+            tk_timeout = timeouts.get("tiktok_future", future_timeout)
+            try:
+                tiktok_items, tiktok_error = tiktok_future.result(timeout=tk_timeout)
+                if tiktok_error and progress:
+                    progress.show_error(f"TikTok error: {tiktok_error}")
+            except TimeoutError:
+                tiktok_error = f"TikTok search timed out after {tk_timeout}s"
+                if progress:
+                    progress.show_error(tiktok_error)
+            except Exception as e:
+                tiktok_error = f"{type(e).__name__}: {e}"
+                if progress:
+                    progress.show_error(f"TikTok error: {e}")
+            if progress:
+                progress.end_tiktok(len(tiktok_items))
+
+        if hackernews_future:
+            hn_timeout = timeouts.get("hackernews_future", future_timeout)
+            try:
+                hackernews_items, hackernews_error = hackernews_future.result(timeout=hn_timeout)
+                if hackernews_error and progress:
+                    progress.show_error(f"HN error: {hackernews_error}")
+            except TimeoutError:
+                hackernews_error = f"HN search timed out after {hn_timeout}s"
+                if progress:
+                    progress.show_error(hackernews_error)
+            except Exception as e:
+                hackernews_error = f"{type(e).__name__}: {e}"
+                if progress:
+                    progress.show_error(f"HN error: {e}")
+            if progress:
+                progress.end_hackernews(len(hackernews_items))
+
+        if polymarket_future:
+            pm_timeout = timeouts.get("polymarket_future", future_timeout)
+            try:
+                polymarket_items, polymarket_error = polymarket_future.result(timeout=pm_timeout)
+                if polymarket_error and progress:
+                    progress.show_error(f"Polymarket error: {polymarket_error}")
+            except TimeoutError:
+                polymarket_error = f"Polymarket search timed out after {pm_timeout}s"
+                if progress:
+                    progress.show_error(polymarket_error)
+            except Exception as e:
+                polymarket_error = f"{type(e).__name__}: {e}"
+                if progress:
+                    progress.show_error(f"Polymarket error: {e}")
+            if progress:
+                progress.end_polymarket(len(polymarket_items))
 
         if web_future:
             try:
@@ -750,6 +1003,14 @@ def run_research(
         if progress:
             progress.end_reddit_enrich()
 
+    # Enrich HN stories with comments
+    if hackernews_items:
+        try:
+            hackernews_items = hackernews.enrich_top_stories(hackernews_items, depth=depth)
+        except Exception as e:
+            sys.stderr.write(f"[HN] Enrichment error: {e}\n")
+            sys.stderr.flush()
+
     # Phase 2: Supplemental search based on entities from Phase 1
     # Skip on --quick (speed matters), mock mode, or if Reddit is rate-limiting
     if depth != "quick" and not mock and (reddit_items or x_items):
@@ -757,13 +1018,14 @@ def run_research(
             topic, reddit_items, x_items,
             from_date, to_date, depth, x_source, progress,
             skip_reddit=rate_limited,
+            resolved_handle=resolved_handle,
         )
         if sup_reddit:
             reddit_items.extend(sup_reddit)
         if sup_x:
             x_items.extend(sup_x)
 
-    return reddit_items, x_items, youtube_items, web_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error, youtube_error, web_error
+    return reddit_items, x_items, youtube_items, tiktok_items, hackernews_items, polymarket_items, web_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error, youtube_error, tiktok_error, hackernews_error, polymarket_error, web_error
 
 
 def main():
@@ -834,6 +1096,30 @@ def main():
         metavar="SECS",
         help="Global timeout in seconds (default: 180, quick: 90, deep: 300)",
     )
+    parser.add_argument(
+        "--x-handle",
+        type=str,
+        default=None,
+        metavar="HANDLE",
+        help="Resolved X handle for topic entity (without @). Searched unfiltered in Phase 2.",
+    )
+    parser.add_argument(
+        "--search",
+        type=str,
+        default=None,
+        metavar="SOURCES",
+        help=(
+            "Comma-separated list of sources to run. "
+            f"Valid: {', '.join(sorted(VALID_SEARCH_SOURCES))}. "
+            "Example: --search reddit,hn  (default: all configured sources)"
+        ),
+    )
+    parser.add_argument(
+        "--no-native-web",
+        action="store_true",
+        default=False,
+        help="Skip native web search backends (Parallel/Brave/OpenRouter). Use when the assistant has its own WebSearch tool.",
+    )
 
     args = parser.parse_args()
 
@@ -873,6 +1159,9 @@ def main():
     # Auto-detect yt-dlp for YouTube search
     has_ytdlp = env.is_ytdlp_available()
 
+    # Auto-detect Apify for TikTok
+    has_apify = env.is_apify_available(config)
+
     # --diagnose: show source availability and exit
     if args.diagnose:
         web_source = env.get_web_search_source(config)
@@ -884,6 +1173,9 @@ def main():
             "bird_authenticated": x_source_status["bird_authenticated"],
             "bird_username": x_source_status.get("bird_username"),
             "youtube": has_ytdlp,
+            "tiktok": has_apify,
+            "hackernews": True,
+            "polymarket": True,
             "web_search_backend": web_source,
             "parallel_ai": bool(config.get("PARALLEL_API_KEY")),
             "brave": bool(config.get("BRAVE_API_KEY")),
@@ -911,7 +1203,10 @@ def main():
         "bird_authenticated": x_source_status["bird_authenticated"],
         "bird_username": x_source_status.get("bird_username"),
         "youtube": has_ytdlp,
-        "web_search_backend": web_source,
+        "tiktok": has_apify,
+        "hackernews": True,
+        "polymarket": True,
+        "web_search_backend": "deferred to assistant" if args.no_native_web else web_source,
     }
     ui.show_diagnostic_banner(diag)
 
@@ -922,8 +1217,10 @@ def main():
     if x_source == 'bird':
         if available == 'reddit':
             available = 'both'  # Now have both Reddit + X (via Bird)
+        elif available == 'reddit-web':
+            available = 'all'  # Reddit + X (via Bird) + Web
         elif available == 'web':
-            available = 'x'  # Now have X via Bird
+            available = 'x-web'  # X via Bird + Web
 
     # Mock mode can work without keys
     if args.mock:
@@ -987,8 +1284,33 @@ def main():
     else:
         mode = sources
 
+    # Apply --search flag: restrict sources to the specified subset
+    search_do_hackernews = True
+    search_do_polymarket = True
+    search_run_youtube = has_ytdlp
+    search_run_tiktok = has_apify
+    if args.search:
+        search_sources = parse_search_flag(args.search)
+        has_reddit = "reddit" in search_sources
+        has_x = "x" in search_sources
+        search_do_hackernews = "hn" in search_sources
+        search_do_polymarket = "polymarket" in search_sources
+        search_run_youtube = "youtube" in search_sources and has_ytdlp
+        search_run_tiktok = "tiktok" in search_sources and has_apify
+        include_search_web = "web" in search_sources
+        # Map to existing sources string
+        if has_reddit and has_x:
+            sources = "both" + ("-web" if include_search_web else "")
+            sources = "all" if include_search_web else "both"
+        elif has_reddit:
+            sources = "reddit-web" if include_search_web else "reddit"
+        elif has_x:
+            sources = "x-web" if include_search_web else "x"
+        else:
+            sources = "web"  # hn/polymarket only; no Reddit/X
+
     # Run research
-    reddit_items, x_items, youtube_items, web_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error, youtube_error, web_error = run_research(
+    reddit_items, x_items, youtube_items, tiktok_items, hackernews_items, polymarket_items, web_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error, youtube_error, tiktok_error, hackernews_error, polymarket_error, web_error = run_research(
         args.topic,
         sources,
         config,
@@ -999,8 +1321,13 @@ def main():
         args.mock,
         progress,
         x_source=x_source or "xai",
-        run_youtube=has_ytdlp,
+        run_youtube=search_run_youtube,
+        run_tiktok=search_run_tiktok,
         timeouts=timeouts,
+        resolved_handle=args.x_handle,
+        do_hackernews=search_do_hackernews,
+        do_polymarket=search_do_polymarket,
+        no_native_web=args.no_native_web,
     )
 
     # Processing phase
@@ -1010,6 +1337,9 @@ def main():
     normalized_reddit = normalize.normalize_reddit_items(reddit_items, from_date, to_date)
     normalized_x = normalize.normalize_x_items(x_items, from_date, to_date)
     normalized_youtube = normalize.normalize_youtube_items(youtube_items, from_date, to_date) if youtube_items else []
+    normalized_tiktok = normalize.normalize_tiktok_items(tiktok_items, from_date, to_date) if tiktok_items else []
+    normalized_hn = normalize.normalize_hackernews_items(hackernews_items, from_date, to_date) if hackernews_items else []
+    normalized_pm = normalize.normalize_polymarket_items(polymarket_items, from_date, to_date) if polymarket_items else []
     normalized_web = websearch.normalize_websearch_items(web_items, from_date, to_date) if web_items else []
 
     # Hard date filter: exclude items with verified dates outside the range
@@ -1020,24 +1350,38 @@ def main():
     # that prefers recent videos but keeps older ones for evergreen topics.
     # YouTube content has a longer shelf life than tweets/posts.
     filtered_youtube = normalized_youtube
+    # TikTok: hard date filter (tiktok.py already pre-filters, but safety net)
+    filtered_tiktok = normalize.filter_by_date_range(normalized_tiktok, from_date, to_date) if normalized_tiktok else []
+    filtered_hn = normalize.filter_by_date_range(normalized_hn, from_date, to_date) if normalized_hn else []
+    # Polymarket: skip hard date filter - markets are active/traded, updatedAt is fine
+    filtered_pm = normalized_pm
     filtered_web = normalize.filter_by_date_range(normalized_web, from_date, to_date) if normalized_web else []
 
     # Score items
     scored_reddit = score.score_reddit_items(filtered_reddit)
     scored_x = score.score_x_items(filtered_x)
     scored_youtube = score.score_youtube_items(filtered_youtube) if filtered_youtube else []
+    scored_tiktok = score.score_tiktok_items(filtered_tiktok) if filtered_tiktok else []
+    scored_hn = score.score_hackernews_items(filtered_hn) if filtered_hn else []
+    scored_pm = score.score_polymarket_items(filtered_pm) if filtered_pm else []
     scored_web = score.score_websearch_items(filtered_web) if filtered_web else []
 
     # Sort items
     sorted_reddit = score.sort_items(scored_reddit)
     sorted_x = score.sort_items(scored_x)
     sorted_youtube = score.sort_items(scored_youtube) if scored_youtube else []
+    sorted_tiktok = score.sort_items(scored_tiktok) if scored_tiktok else []
+    sorted_hn = score.sort_items(scored_hn) if scored_hn else []
+    sorted_pm = score.sort_items(scored_pm) if scored_pm else []
     sorted_web = score.sort_items(scored_web) if scored_web else []
 
     # Dedupe items
     deduped_reddit = dedupe.dedupe_reddit(sorted_reddit)
     deduped_x = dedupe.dedupe_x(sorted_x)
     deduped_youtube = dedupe.dedupe_youtube(sorted_youtube) if sorted_youtube else []
+    deduped_tiktok = dedupe.dedupe_tiktok(sorted_tiktok) if sorted_tiktok else []
+    deduped_hn = dedupe.dedupe_hackernews(sorted_hn) if sorted_hn else []
+    deduped_pm = dedupe.dedupe_polymarket(sorted_pm) if sorted_pm else []
     deduped_web = websearch.dedupe_websearch(sorted_web) if sorted_web else []
 
     # Minimum result guarantee: if all Reddit results were filtered out but
@@ -1046,6 +1390,11 @@ def main():
         print("[REDDIT WARNING] All results scored below threshold, keeping top 3 by relevance", file=sys.stderr)
         by_relevance = sorted(normalized_reddit, key=lambda item: item.relevance, reverse=True)
         deduped_reddit = by_relevance[:3]
+
+    # Cross-source linking: annotate items that discuss the same story
+    dedupe.cross_source_link(
+        deduped_reddit, deduped_x, deduped_youtube, deduped_tiktok, deduped_hn, deduped_pm, deduped_web,
+    )
 
     progress.end_processing()
 
@@ -1061,11 +1410,18 @@ def main():
     report.reddit = deduped_reddit
     report.x = deduped_x
     report.youtube = deduped_youtube
+    report.tiktok = deduped_tiktok
+    report.hackernews = deduped_hn
+    report.polymarket = deduped_pm
     report.web = deduped_web
     report.reddit_error = reddit_error
     report.x_error = x_error
     report.youtube_error = youtube_error
+    report.tiktok_error = tiktok_error
+    report.hackernews_error = hackernews_error
+    report.polymarket_error = polymarket_error
     report.web_error = web_error
+    report.resolved_x_handle = args.x_handle
 
     # Generate context snippet
     report.context_snippet_md = render.render_context_snippet(report)
@@ -1077,7 +1433,7 @@ def main():
     if sources == "web":
         progress.show_web_only_complete()
     else:
-        progress.show_complete(len(deduped_reddit), len(deduped_x), len(deduped_youtube))
+        progress.show_complete(len(deduped_reddit), len(deduped_x), len(deduped_youtube), len(deduped_hn), len(deduped_pm), len(deduped_tiktok))
 
     # Build source info for status footer
     source_info = {}
@@ -1090,6 +1446,10 @@ def main():
             source_info["x_skip_reason"] = "No Bird CLI or XAI_API_KEY (Node.js 22+ needed for Bird)"
     if not has_ytdlp:
         source_info["youtube_skip_reason"] = "yt-dlp not installed — fix: brew install yt-dlp"
+    elif has_ytdlp and not report.youtube:
+        source_info["youtube_skip_reason"] = "0 results (query may be too specific)"
+    if not has_apify:
+        source_info["tiktok_skip_reason"] = "No APIFY_API_TOKEN — sign up free at apify.com"
     if not web_source:
         source_info["web_skip_reason"] = "assistant will use WebSearch (add BRAVE_API_KEY for native search)"
 
@@ -1133,6 +1493,26 @@ def main():
                 "author": item.channel_name,
                 "content": item.transcript_snippet[:500] if item.transcript_snippet else item.title,
                 "engagement_score": item.engagement.views if item.engagement and item.engagement.views else 0,
+                "relevance_score": item.relevance,
+            })
+        for item in deduped_hn:
+            findings.append({
+                "source": "hackernews",
+                "url": item.hn_url,
+                "title": item.title,
+                "author": item.author,
+                "content": item.title,
+                "engagement_score": item.engagement.score if item.engagement else 0,
+                "relevance_score": item.relevance,
+            })
+        for item in deduped_pm:
+            findings.append({
+                "source": "polymarket",
+                "url": item.url,
+                "title": item.question,
+                "author": "polymarket",
+                "content": item.title,
+                "engagement_score": item.engagement.volume if item.engagement and item.engagement.volume else 0,
                 "relevance_score": item.relevance,
             })
         for item in deduped_web:

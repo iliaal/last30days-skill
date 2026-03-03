@@ -71,6 +71,26 @@ YOUTUBE_MESSAGES = [
     "Fetching transcripts...",
 ]
 
+TIKTOK_MESSAGES = [
+    "Searching TikTok for trending videos...",
+    "Finding what's viral on TikTok...",
+    "Scanning TikTok for relevant content...",
+]
+
+HN_MESSAGES = [
+    "Searching Hacker News...",
+    "Scanning HN front page stories...",
+    "Finding technical discussions...",
+    "Discovering developer conversations...",
+]
+
+POLYMARKET_MESSAGES = [
+    "Checking prediction markets...",
+    "Finding what people are betting on...",
+    "Scanning Polymarket for odds...",
+    "Discovering prediction markets...",
+]
+
 PROCESSING_MESSAGES = [
     "Crunching the data...",
     "Scoring and ranking...",
@@ -145,13 +165,14 @@ DOTS_FRAMES = ['   ', '.  ', '.. ', '...']
 class Spinner:
     """Animated spinner for long-running operations."""
 
-    def __init__(self, message: str = "Working", color: str = Colors.CYAN):
+    def __init__(self, message: str = "Working", color: str = Colors.CYAN, quiet: bool = False):
         self.message = message
         self.color = color
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.frame_idx = 0
         self.shown_static = False
+        self.quiet = quiet  # Suppress non-TTY start message (still shows ✓ completion)
 
     def _spin(self):
         while self.running:
@@ -169,7 +190,7 @@ class Spinner:
             self.thread.start()
         else:
             # Not a TTY (Claude Code) - just print once
-            if not self.shown_static:
+            if not self.shown_static and not self.quiet:
                 sys.stderr.write(f"⏳ {self.message}\n")
                 sys.stderr.flush()
                 self.shown_static = True
@@ -256,6 +277,33 @@ class ProgressDisplay:
         if self.spinner:
             self.spinner.stop(f"{Colors.RED}YouTube{Colors.RESET} Found {count} videos")
 
+    def start_tiktok(self):
+        msg = random.choice(TIKTOK_MESSAGES)
+        self.spinner = Spinner(f"{Colors.PURPLE}TikTok{Colors.RESET} {msg}", Colors.PURPLE)
+        self.spinner.start()
+
+    def end_tiktok(self, count: int):
+        if self.spinner:
+            self.spinner.stop(f"{Colors.PURPLE}TikTok{Colors.RESET} Found {count} videos")
+
+    def start_hackernews(self):
+        msg = random.choice(HN_MESSAGES)
+        self.spinner = Spinner(f"{Colors.YELLOW}HN{Colors.RESET} {msg}", Colors.YELLOW, quiet=True)
+        self.spinner.start()
+
+    def end_hackernews(self, count: int):
+        if self.spinner:
+            self.spinner.stop(f"{Colors.YELLOW}HN{Colors.RESET} Found {count} stories")
+
+    def start_polymarket(self):
+        msg = random.choice(POLYMARKET_MESSAGES)
+        self.spinner = Spinner(f"{Colors.GREEN}Polymarket{Colors.RESET} {msg}", Colors.GREEN, quiet=True)
+        self.spinner.start()
+
+    def end_polymarket(self, count: int):
+        if self.spinner:
+            self.spinner.stop(f"{Colors.GREEN}Polymarket{Colors.RESET} Found {count} markets")
+
     def start_processing(self):
         msg = random.choice(PROCESSING_MESSAGES)
         self.spinner = Spinner(f"{Colors.PURPLE}Processing{Colors.RESET} {msg}", Colors.PURPLE)
@@ -265,7 +313,7 @@ class ProgressDisplay:
         if self.spinner:
             self.spinner.stop()
 
-    def show_complete(self, reddit_count: int, x_count: int, youtube_count: int = 0):
+    def show_complete(self, reddit_count: int, x_count: int, youtube_count: int = 0, hn_count: int = 0, pm_count: int = 0, tiktok_count: int = 0):
         elapsed = time.time() - self.start_time
         if IS_TTY:
             sys.stderr.write(f"\n{Colors.GREEN}{Colors.BOLD}✓ Research complete{Colors.RESET} ")
@@ -274,11 +322,23 @@ class ProgressDisplay:
             sys.stderr.write(f"{Colors.CYAN}X:{Colors.RESET} {x_count} posts")
             if youtube_count:
                 sys.stderr.write(f"  {Colors.RED}YouTube:{Colors.RESET} {youtube_count} videos")
+            if tiktok_count:
+                sys.stderr.write(f"  {Colors.PURPLE}TikTok:{Colors.RESET} {tiktok_count} videos")
+            if hn_count:
+                sys.stderr.write(f"  {Colors.YELLOW}HN:{Colors.RESET} {hn_count} stories")
+            if pm_count:
+                sys.stderr.write(f"  {Colors.GREEN}Polymarket:{Colors.RESET} {pm_count} markets")
             sys.stderr.write("\n\n")
         else:
             parts = [f"Reddit: {reddit_count} threads", f"X: {x_count} posts"]
             if youtube_count:
                 parts.append(f"YouTube: {youtube_count} videos")
+            if tiktok_count:
+                parts.append(f"TikTok: {tiktok_count} videos")
+            if hn_count:
+                parts.append(f"HN: {hn_count} stories")
+            if pm_count:
+                parts.append(f"Polymarket: {pm_count} markets")
             sys.stderr.write(f"✓ Research complete ({elapsed:.1f}s) - {', '.join(parts)}\n")
         sys.stderr.flush()
 

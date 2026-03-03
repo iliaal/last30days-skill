@@ -11,6 +11,32 @@ from . import schema
 OUTPUT_DIR = Path.home() / ".local" / "share" / "last30days" / "out"
 
 
+def _xref_tag(item) -> str:
+    """Return ' [also on: Reddit, HN]' string if item has cross_refs, else ''."""
+    refs = getattr(item, 'cross_refs', None)
+    if not refs:
+        return ""
+    source_names = set()
+    for ref_id in refs:
+        if ref_id.startswith('R'):
+            source_names.add('Reddit')
+        elif ref_id.startswith('X'):
+            source_names.add('X')
+        elif ref_id.startswith('YT'):
+            source_names.add('YouTube')
+        elif ref_id.startswith('TK'):
+            source_names.add('TikTok')
+        elif ref_id.startswith('HN'):
+            source_names.add('HN')
+        elif ref_id.startswith('PM'):
+            source_names.add('Polymarket')
+        elif ref_id.startswith('W'):
+            source_names.add('Web')
+    if source_names:
+        return f" [also on: {', '.join(sorted(source_names))}]"
+    return ""
+
+
 def ensure_output_dir():
     """Ensure output directory exists. Supports env override and sandbox fallback."""
     global OUTPUT_DIR
@@ -30,9 +56,13 @@ def _assess_data_freshness(report: schema.Report) -> dict:
     reddit_recent = sum(1 for r in report.reddit if r.date and r.date >= report.range_from)
     x_recent = sum(1 for x in report.x if x.date and x.date >= report.range_from)
     web_recent = sum(1 for w in report.web if w.date and w.date >= report.range_from)
+    hn_recent = sum(1 for h in report.hackernews if h.date and h.date >= report.range_from)
+    pm_recent = sum(1 for p in report.polymarket if p.date and p.date >= report.range_from)
 
-    total_recent = reddit_recent + x_recent + web_recent
-    total_items = len(report.reddit) + len(report.x) + len(report.web)
+    tiktok_recent = sum(1 for t in report.tiktok if t.date and t.date >= report.range_from)
+
+    total_recent = reddit_recent + x_recent + web_recent + hn_recent + pm_recent + tiktok_recent
+    total_items = len(report.reddit) + len(report.x) + len(report.web) + len(report.hackernews) + len(report.polymarket) + len(report.tiktok)
 
     return {
         "reddit_recent": reddit_recent,
@@ -95,13 +125,15 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
         lines.append(f"**OpenAI Model:** {report.openai_model_used}")
     if report.xai_model_used:
         lines.append(f"**xAI Model:** {report.xai_model_used}")
+    if report.resolved_x_handle:
+        lines.append(f"**Resolved X Handle:** @{report.resolved_x_handle}")
     lines.append("")
 
     # Coverage note for partial coverage
-    if report.mode == "reddit-only" and missing_keys == "x":
-        lines.append("*💡 Tip: Add XAI_API_KEY for X/Twitter data and better triangulation.*")
+    if report.mode == "reddit-only" and missing_keys in ("x", "none"):
+        lines.append("*💡 Tip: Add an xAI key (`XAI_API_KEY`) for X/Twitter data and better triangulation.*")
         lines.append("")
-    elif report.mode == "x-only" and missing_keys == "reddit":
+    elif report.mode == "x-only" and missing_keys in ("reddit", "none"):
         lines.append("*💡 Tip: Add OPENAI_API_KEY or run `codex login` for Reddit data and better triangulation. If already signed in, re-run `codex login`.*")
         lines.append("")
 
@@ -134,7 +166,7 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
             date_str = f" ({item.date})" if item.date else " (date unknown)"
             conf_str = f" [date:{item.date_confidence}]" if item.date_confidence != "high" else ""
 
-            lines.append(f"**{item.id}** (score:{item.score}) r/{item.subreddit}{date_str}{conf_str}{eng_str}")
+            lines.append(f"**{item.id}** (score:{item.score}) r/{item.subreddit}{date_str}{conf_str}{eng_str}{_xref_tag(item)}")
             lines.append(f"  {item.title}")
             lines.append(f"  {item.url}")
             lines.append(f"  *{item.why_relevant}*")
@@ -176,7 +208,7 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
             date_str = f" ({item.date})" if item.date else " (date unknown)"
             conf_str = f" [date:{item.date_confidence}]" if item.date_confidence != "high" else ""
 
-            lines.append(f"**{item.id}** (score:{item.score}) @{item.author_handle}{date_str}{conf_str}{eng_str}")
+            lines.append(f"**{item.id}** (score:{item.score}) @{item.author_handle}{date_str}{conf_str}{eng_str}{_xref_tag(item)}")
             lines.append(f"  {item.text[:200]}...")
             lines.append(f"  {item.url}")
             lines.append(f"  *{item.why_relevant}*")
@@ -205,7 +237,7 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
 
             date_str = f" ({item.date})" if item.date else ""
 
-            lines.append(f"**{item.id}** (score:{item.score}) {item.channel_name}{date_str}{eng_str}")
+            lines.append(f"**{item.id}** (score:{item.score}) {item.channel_name}{date_str}{eng_str}{_xref_tag(item)}")
             lines.append(f"  {item.title}")
             lines.append(f"  {item.url}")
             if item.transcript_snippet:
@@ -213,6 +245,131 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
                 if len(item.transcript_snippet) > 200:
                     snippet += "..."
                 lines.append(f"  Transcript: {snippet}")
+            lines.append(f"  *{item.why_relevant}*")
+            lines.append("")
+
+    # TikTok items
+    if report.tiktok_error:
+        lines.append("### TikTok Videos")
+        lines.append("")
+        lines.append(f"**ERROR:** {report.tiktok_error}")
+        lines.append("")
+    elif report.tiktok:
+        lines.append("### TikTok Videos")
+        lines.append("")
+        for item in report.tiktok[:limit]:
+            eng_str = ""
+            if item.engagement:
+                eng = item.engagement
+                parts = []
+                if eng.views is not None:
+                    parts.append(f"{eng.views:,} views")
+                if eng.likes is not None:
+                    parts.append(f"{eng.likes:,} likes")
+                if parts:
+                    eng_str = f" [{', '.join(parts)}]"
+
+            date_str = f" ({item.date})" if item.date else ""
+
+            lines.append(f"**{item.id}** (score:{item.score}) @{item.author_name}{date_str}{eng_str}{_xref_tag(item)}")
+            lines.append(f"  {item.text[:200]}")
+            lines.append(f"  {item.url}")
+            if item.caption_snippet and item.caption_snippet != item.text[:len(item.caption_snippet)]:
+                snippet = item.caption_snippet[:200]
+                if len(item.caption_snippet) > 200:
+                    snippet += "..."
+                lines.append(f"  Caption: {snippet}")
+            if item.hashtags:
+                lines.append(f"  Tags: {' '.join('#' + h for h in item.hashtags[:8])}")
+            lines.append(f"  *{item.why_relevant}*")
+            lines.append("")
+
+    # Hacker News items
+    if report.hackernews_error:
+        lines.append("### Hacker News Stories")
+        lines.append("")
+        lines.append(f"**ERROR:** {report.hackernews_error}")
+        lines.append("")
+    elif report.hackernews:
+        lines.append("### Hacker News Stories")
+        lines.append("")
+        for item in report.hackernews[:limit]:
+            eng_str = ""
+            if item.engagement:
+                eng = item.engagement
+                parts = []
+                if eng.score is not None:
+                    parts.append(f"{eng.score}pts")
+                if eng.num_comments is not None:
+                    parts.append(f"{eng.num_comments}cmt")
+                if parts:
+                    eng_str = f" [{', '.join(parts)}]"
+
+            date_str = f" ({item.date})" if item.date else ""
+
+            lines.append(f"**{item.id}** (score:{item.score}) hn/{item.author}{date_str}{eng_str}{_xref_tag(item)}")
+            lines.append(f"  {item.title}")
+            lines.append(f"  {item.hn_url}")
+            lines.append(f"  *{item.why_relevant}*")
+
+            # Comment insights
+            if item.comment_insights:
+                lines.append(f"  Insights:")
+                for insight in item.comment_insights[:3]:
+                    lines.append(f"    - {insight}")
+
+            lines.append("")
+
+    # Polymarket items
+    if report.polymarket_error:
+        lines.append("### Prediction Markets (Polymarket)")
+        lines.append("")
+        lines.append(f"**ERROR:** {report.polymarket_error}")
+        lines.append("")
+    elif report.polymarket:
+        lines.append("### Prediction Markets (Polymarket)")
+        lines.append("")
+        for item in report.polymarket[:limit]:
+            eng_str = ""
+            if item.engagement:
+                eng = item.engagement
+                parts = []
+                if eng.volume is not None:
+                    if eng.volume >= 1_000_000:
+                        parts.append(f"${eng.volume/1_000_000:.1f}M volume")
+                    elif eng.volume >= 1_000:
+                        parts.append(f"${eng.volume/1_000:.0f}K volume")
+                    else:
+                        parts.append(f"${eng.volume:.0f} volume")
+                if eng.liquidity is not None:
+                    if eng.liquidity >= 1_000_000:
+                        parts.append(f"${eng.liquidity/1_000_000:.1f}M liquidity")
+                    elif eng.liquidity >= 1_000:
+                        parts.append(f"${eng.liquidity/1_000:.0f}K liquidity")
+                    else:
+                        parts.append(f"${eng.liquidity:.0f} liquidity")
+                if parts:
+                    eng_str = f" [{', '.join(parts)}]"
+
+            date_str = f" ({item.date})" if item.date else ""
+
+            lines.append(f"**{item.id}** (score:{item.score}){eng_str}{_xref_tag(item)}")
+            lines.append(f"  {item.question}")
+
+            # Outcome prices with price movement
+            if item.outcome_prices:
+                outcomes = []
+                for name, price in item.outcome_prices:
+                    pct = price * 100
+                    outcomes.append(f"{name}: {pct:.0f}%")
+                outcome_line = " | ".join(outcomes)
+                if item.outcomes_remaining > 0:
+                    outcome_line += f" and {item.outcomes_remaining} more"
+                if item.price_movement:
+                    outcome_line += f" ({item.price_movement})"
+                lines.append(f"  {outcome_line}")
+
+            lines.append(f"  {item.url}")
             lines.append(f"  *{item.why_relevant}*")
             lines.append("")
 
@@ -229,7 +386,7 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
             date_str = f" ({item.date})" if item.date else " (date unknown)"
             conf_str = f" [date:{item.date_confidence}]" if item.date_confidence != "high" else ""
 
-            lines.append(f"**{item.id}** [WEB] (score:{item.score}) {item.source_domain}{date_str}{conf_str}")
+            lines.append(f"**{item.id}** [WEB] (score:{item.score}) {item.source_domain}{date_str}{conf_str}{_xref_tag(item)}")
             lines.append(f"  {item.title}")
             lines.append(f"  {item.url}")
             lines.append(f"  {item.snippet[:150]}...")
@@ -263,7 +420,7 @@ def render_source_status(report: schema.Report, source_info: dict = None) -> str
     elif report.reddit:
         lines.append(f"  ✅ Reddit: {len(report.reddit)} threads")
     elif report.mode in ("both", "reddit-only", "all", "reddit-web"):
-        lines.append("  ⚠️ Reddit: 0 threads found")
+        pass  # Hide zero-result sources
     else:
         reason = source_info.get("reddit_skip_reason", "not configured")
         lines.append(f"  ⏭️ Reddit: skipped — {reason}")
@@ -272,9 +429,12 @@ def render_source_status(report: schema.Report, source_info: dict = None) -> str
     if report.x_error:
         lines.append(f"  ❌ X: error — {report.x_error}")
     elif report.x:
-        lines.append(f"  ✅ X: {len(report.x)} posts")
+        x_line = f"  ✅ X: {len(report.x)} posts"
+        if report.resolved_x_handle:
+            x_line += f" (via @{report.resolved_x_handle} + keyword search)"
+        lines.append(x_line)
     elif report.mode in ("both", "x-only", "all", "x-web"):
-        lines.append("  ⚠️ X: 0 posts found")
+        pass  # Hide zero-result sources
     else:
         reason = source_info.get("x_skip_reason", "No Bird CLI or XAI_API_KEY")
         lines.append(f"  ⏭️ X: skipped — {reason}")
@@ -285,9 +445,29 @@ def render_source_status(report: schema.Report, source_info: dict = None) -> str
     elif report.youtube:
         with_transcripts = sum(1 for v in report.youtube if getattr(v, 'transcript_snippet', None))
         lines.append(f"  ✅ YouTube: {len(report.youtube)} videos ({with_transcripts} with transcripts)")
-    else:
-        reason = source_info.get("youtube_skip_reason", "yt-dlp not installed (brew install yt-dlp)")
-        lines.append(f"  ⏭️ YouTube: skipped — {reason}")
+    # Hide when zero results (no skip reason line needed)
+
+    # TikTok
+    if report.tiktok_error:
+        lines.append(f"  ❌ TikTok: error — {report.tiktok_error}")
+    elif report.tiktok:
+        with_captions = sum(1 for v in report.tiktok if getattr(v, 'caption_snippet', None))
+        lines.append(f"  ✅ TikTok: {len(report.tiktok)} videos ({with_captions} with captions)")
+    # Hide when zero results
+
+    # Hacker News
+    if report.hackernews_error:
+        lines.append(f"  ❌ HN: error - {report.hackernews_error}")
+    elif report.hackernews:
+        lines.append(f"  ✅ HN: {len(report.hackernews)} stories")
+    # Hide when zero results
+
+    # Polymarket
+    if report.polymarket_error:
+        lines.append(f"  ❌ Polymarket: error - {report.polymarket_error}")
+    elif report.polymarket:
+        lines.append(f"  ✅ Polymarket: {len(report.polymarket)} markets")
+    # Hide when zero results
 
     # Web
     if report.web_error:
@@ -326,6 +506,12 @@ def render_context_snippet(report: schema.Report) -> str:
         all_items.append((item.score, "Reddit", item.title, item.url))
     for item in report.x[:5]:
         all_items.append((item.score, "X", item.text[:50] + "...", item.url))
+    for item in report.tiktok[:5]:
+        all_items.append((item.score, "TikTok", item.text[:50] + "...", item.url))
+    for item in report.hackernews[:5]:
+        all_items.append((item.score, "HN", item.title[:50] + "...", item.hn_url))
+    for item in report.polymarket[:5]:
+        all_items.append((item.score, "Polymarket", item.question[:50] + "...", item.url))
     for item in report.web[:5]:
         all_items.append((item.score, "Web", item.title[:50] + "...", item.url))
 
@@ -413,6 +599,79 @@ def render_full_report(report: schema.Report) -> str:
 
             lines.append("")
             lines.append(f"> {item.text}")
+            lines.append("")
+
+    # TikTok section
+    if report.tiktok:
+        lines.append("## TikTok Videos")
+        lines.append("")
+        for item in report.tiktok:
+            lines.append(f"### {item.id}: @{item.author_name}")
+            lines.append("")
+            lines.append(f"- **URL:** {item.url}")
+            lines.append(f"- **Date:** {item.date or 'Unknown'}")
+            lines.append(f"- **Score:** {item.score}/100")
+            lines.append(f"- **Relevance:** {item.why_relevant}")
+
+            if item.engagement:
+                eng = item.engagement
+                lines.append(f"- **Engagement:** {eng.views or '?'} views, {eng.likes or '?'} likes, {eng.num_comments or '?'} comments")
+
+            if item.hashtags:
+                lines.append(f"- **Hashtags:** {' '.join('#' + h for h in item.hashtags[:10])}")
+
+            lines.append("")
+            lines.append(f"> {item.text[:300]}")
+            lines.append("")
+
+    # HN section
+    if report.hackernews:
+        lines.append("## Hacker News Stories")
+        lines.append("")
+        for item in report.hackernews:
+            lines.append(f"### {item.id}: {item.title}")
+            lines.append("")
+            lines.append(f"- **Author:** {item.author}")
+            lines.append(f"- **HN URL:** {item.hn_url}")
+            if item.url:
+                lines.append(f"- **Article URL:** {item.url}")
+            lines.append(f"- **Date:** {item.date or 'Unknown'}")
+            lines.append(f"- **Score:** {item.score}/100")
+            lines.append(f"- **Relevance:** {item.why_relevant}")
+
+            if item.engagement:
+                eng = item.engagement
+                lines.append(f"- **Engagement:** {eng.score or '?'} points, {eng.num_comments or '?'} comments")
+
+            if item.comment_insights:
+                lines.append("")
+                lines.append("**Key Insights from Comments:**")
+                for insight in item.comment_insights:
+                    lines.append(f"- {insight}")
+
+            lines.append("")
+
+    # Polymarket section
+    if report.polymarket:
+        lines.append("## Prediction Markets (Polymarket)")
+        lines.append("")
+        for item in report.polymarket:
+            lines.append(f"### {item.id}: {item.question}")
+            lines.append("")
+            lines.append(f"- **Event:** {item.title}")
+            lines.append(f"- **URL:** {item.url}")
+            lines.append(f"- **Date:** {item.date or 'Unknown'}")
+            lines.append(f"- **Score:** {item.score}/100")
+
+            if item.outcome_prices:
+                outcomes = [f"{name}: {price*100:.0f}%" for name, price in item.outcome_prices]
+                lines.append(f"- **Outcomes:** {' | '.join(outcomes)}")
+            if item.price_movement:
+                lines.append(f"- **Trend:** {item.price_movement}")
+            if item.engagement:
+                eng = item.engagement
+                lines.append(f"- **Volume:** ${eng.volume or 0:,.0f} | Liquidity: ${eng.liquidity or 0:,.0f}")
+
             lines.append("")
 
     # Web section

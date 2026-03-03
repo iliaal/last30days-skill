@@ -1,18 +1,24 @@
-# /last30days v2.1
+# /last30days v2.7
 
-**The AI world reinvents itself every month. This skill keeps you current.** /last30days researches your topic across Reddit, X, YouTube, and the web from the last 30 days, finds what the community is actually upvoting, sharing, and saying on camera, and writes you a prompt that works today, not six months ago. Whether it's Seedance 2.0 access, Suno music prompts, or the latest Nano Banana Pro techniques, you'll prompt like someone who's been paying attention.
+**The AI world reinvents itself every month. This skill keeps you current.** /last30days researches your topic across Reddit, X, YouTube, TikTok, Hacker News, Polymarket, and the web from the last 30 days, finds what the community is actually upvoting, sharing, betting on, and saying on camera, and writes you a grounded narrative with real citations. Whether it's Seedance 2.0 access, paper.design prompts, or the latest Nano Banana Pro techniques, you'll know what people who are paying attention already know.
 
-**New in V2.1  - three headline features:**
+**New in V2.7 — TikTok as a source:**
 
-1. **Open-class skill with watchlists.** Add any topic to a watchlist  - your competitors, specific people, emerging technologies  - and /last30days re-researches it on demand or via cron. Designed for always-on environments like [Open Claw](https://github.com/openclaw/openclaw) where a bot can run research on a schedule and accumulate findings over time.
-2. **YouTube transcripts as a 4th source.** When yt-dlp is installed, /last30days automatically searches YouTube, grabs view counts, and extracts auto-generated transcripts from the top videos. A 20-minute review contains 10x the signal of a single post - now the skill reads it. Inspired by [@steipete](https://x.com/steipete)'s yt-dlp + [summarize](https://github.com/steipete/summarize) toolchain.
-3. **Works in OpenAI Codex CLI.** Same skill, same engine. Install to `~/.agents/skills/last30days` and invoke with `$last30days`. Claude Code and Codex users get the same research.
+TikTok is now the 7th signal source. Search any topic and get viral TikTok videos with views, likes, hashtags, and extracted captions — scored and ranked alongside Reddit, X, and YouTube. Powered by [Apify](https://apify.com) with a BYO API key ($5/month free credits, no credit card). [Details below.](#whats-new-in-v27)
 
-**New in V2:** Dramatically better search results. Smarter query construction finds posts that V1 missed entirely, and a new two-phase search automatically discovers key @handles and subreddits from initial results, then drills deeper. Free X search (no xAI key needed), `--days=N` for flexible lookback, and automatic model fallback. [Full changelog below.](#whats-new-in-v2)
+**New in V2.5 - dramatically better results:**
 
-**The tradeoff:** V2 finds way more content but takes longer - typically 2-8 minutes depending on how niche your topic is. The old V1 was faster but regularly missed results (like returning 0 X posts on trending topics). We think the depth is worth the wait, but if you'd use a faster "quick mode" that trades some depth for speed, let us know: [@mvanhorn](https://x.com/mvanhorn) / [@slashlast30days](https://x.com/slashlast30days).
+1. **Polymarket prediction markets and Hacker News.** See what people are betting real money on and what the technical community is actually discussing. Search "Arizona Basketball" and get NCAA Tournament championship odds (Arizona: 12%), #1 seed probability (88%), and Big 12 title race (69%) - pulled from 50+ open markets across 10 events, not just Reddit opinions. Search "Iran War" and get 15 live prediction markets with strike probabilities, regime change bets, and war declaration odds. Two-pass query expansion with tag-based domain bridging discovers markets where your topic is an outcome buried inside a broader event, not just a title keyword match. HN stories, Show HN posts, and comment insights are scored by points + comments and participate in cross-source convergence detection.
+2. **Multi-signal quality-ranked relevance scoring.** Every result across all six sources runs through a composite scoring pipeline: bidirectional text similarity with synonym expansion and token overlap, engagement velocity normalization, source authority weighting, cross-platform convergence detection via hybrid trigram-token Jaccard similarity, and temporal recency decay. Polymarket markets are ranked on a 5-factor weighted composite - text relevance (30%), 24-hour volume (30%), liquidity depth (15%), price movement velocity (15%), and outcome competitiveness (10%) - with outcome-aware scoring that matches your topic against individual market positions, not just event titles. A blinded evaluation scored v2.5 at 4.38/5.0 vs 3.73/5.0 for v1 across 5 test topics.
+3. **X handle resolution.** Search "Dor Brothers" and the skill resolves their handle (@thedorbrothers), then searches their posts directly - finding their 5,600-like viral tweet that keyword search missed entirely. Works for people, brands, products, and tools.
 
-**Best for prompt research**: discover what prompting techniques actually work for any tool (ChatGPT, Midjourney, Claude, Figma AI, etc.) by learning from real community discussions and best practices.
+**New in V2.1:** Open-class skill with watchlists, YouTube transcripts as a source, works in OpenAI Codex CLI. [Full changelog below.](#whats-new-in-v21)
+
+**New in V2:** Smarter query construction, two-phase supplemental search, free X search via bundled Bird client, `--days=N` flag, automatic model fallback. [Full changelog below.](#whats-new-in-v2)
+
+**The tradeoff:** /last30days finds a lot of content but takes 2-8 minutes depending on how niche your topic is. Six sources searched in parallel, results scored, deduplicated, and synthesized. We think the depth is worth the wait, but `--quick` mode is there if you need speed over thoroughness.
+
+**Best for prompt research**: discover what prompting techniques actually work for any tool (ChatGPT, Midjourney, Claude, Paper, etc.) by learning from real community discussions and best practices.
 
 **But also great for anything trending**: music, culture, news, product recommendations, viral trends, or any question where "what are people saying right now?" matters.
 
@@ -25,8 +31,9 @@ git clone https://github.com/mvanhorn/last30days-skill.git ~/.claude/skills/last
 # Add your API keys (optional if signed in to Codex)
 mkdir -p ~/.config/last30days
 cat > ~/.config/last30days/.env << 'EOF'
-OPENAI_API_KEY=sk-...   # optional if using `codex login`
-XAI_API_KEY=xai-...       # optional  - cookie auth is default for X search
+OPENAI_API_KEY=sk-...      # optional if using `codex login`
+XAI_API_KEY=xai-...        # optional - cookie auth is default for X search
+APIFY_API_TOKEN=apify_...  # optional - for TikTok (free $5/mo at apify.com)
 EOF
 chmod 600 ~/.config/last30days/.env
 ```
@@ -122,7 +129,7 @@ Examples:
 
 ## What It Does
 
-1. **Researches** - Scans Reddit, X, and YouTube for discussions from the last 30 days
+1. **Researches** - Scans Reddit, X, YouTube, TikTok, Hacker News, Polymarket, and the web for discussions from the last 30 days
 2. **Synthesizes** - Identifies patterns, best practices, and what actually works
 3. **Delivers** - Either writes copy-paste-ready prompts for your target tool, or gives you a curated expert-level answer
 
@@ -233,6 +240,29 @@ This example shows /last30days learning that **JSON prompts dominate** the Nano 
 > - The Bianca Censori Vanity Fair interview  - what she actually said vs. the tabloid headlines
 
 This example shows /last30days as a **current events research tool**  - no prompting, no target tool, just "what's happening with Kanye?" and you get a synthesized expert briefing pulled from 33 X posts and 3 Reddit threads with real engagement data.
+
+---
+
+## Example: Anthropic Odds (Prediction Markets)
+
+**Query:** `/last30days anthropic odds`
+
+**Research Output:**
+> **Pentagon standoff is THE story right now** - Defense Secretary Hegseth gave Anthropic a Friday deadline to drop AI guardrails for military use or face blacklisting via the Defense Production Act, per CBS, CNN, Bloomberg, and a wave of X posts from @The__GDD, @trendy_tech_, and @jimkaskade. The trigger was Claude's use during the Maduro capture operation in January. Anthropic CEO Dario Amodei insists AI-controlled weapons and mass surveillance are lines the company won't cross. Polymarket traders put the ban odds at just 22%, signaling they think it's posturing, per @Lolipeterh.
+>
+> **Prediction markets love Anthropic's tech, skeptical on IPO** - Polymarket gives Anthropic a 98% chance of having the best AI model at end of February and 61% for March (Google at 22%, OpenAI at 10%). Claude 4.6 is dominating. But the IPO picture is murkier: @predictheory flagged that Anthropic IPO-first odds on Kalshi "fell through the floor, ~70% down to the low teens in one move." Polymarket has Anthropic at 64% to IPO before OpenAI, but 95% NO on an IPO by June 2026. Meanwhile, 87% odds Anthropic hits $500B+ valuation this year - current valuation is $380B after a $30B raise led by GIC and Coatue, per Fortune.
+>
+> **Claude FrontierMath odds surging** - Polymarket's "Will Claude score 50% on FrontierMath?" market jumped 28% today to 48% YES. This is a live bet on whether Claude can crack elite-level math benchmarks by June 30.
+
+**Key patterns from the research:**
+1. Pentagon standoff as posturing - Polymarket gives only 22% chance of actual ban, money says it's negotiation theater
+2. Model dominance vs IPO uncertainty - 98% best model, but IPO timing is wide open
+3. FrontierMath as a live benchmark bet - real money tracking Claude's capability trajectory
+4. Big money piling in - Dan Sundheim's D1 Capital, Amazon's quiet bet, $380B valuation
+
+**Research Stats:** 25 X posts (218 likes) + 13 YouTube videos (719K views) + 6 HN stories (48 points) + 11 Polymarket markets (Best model Feb: 98%, March: 61%, IPO first: 64%, $500B+ val: 87%, FrontierMath 50%: 48%)
+
+This example shows /last30days as a **prediction market intelligence tool** - two words ("anthropic odds") and you get 11 live Polymarket positions spanning model benchmarks, IPO timing, valuation milestones, and the Pentagon standoff, all synthesized with X commentary, YouTube analysis, and HN discussion. The two-pass query expansion found markets where "Anthropic" is an outcome inside broader "best AI model" and "AI company IPO" events.
 
 ---
 
@@ -857,9 +887,25 @@ This example shows /last30days discovering **emerging developer workflows** - re
 - **Node.js 22+** - For X search (bundled Twitter GraphQL client)
 - **X session** - Be logged into x.com in your browser, or set `AUTH_TOKEN`/`CT0` env vars
 - **xAI API key** (optional fallback) - If the bundled search can't authenticate, falls back to xAI's Grok API
-- **yt-dlp** (optional) - For YouTube search + transcript extraction. Install via `brew install yt-dlp` or `pip install yt-dlp`. When present, automatically searches YouTube and extracts video transcripts as a 4th source.
+- **yt-dlp** (optional) - For YouTube search + transcript extraction. Install via `brew install yt-dlp` or `pip install yt-dlp`. When present, automatically searches YouTube and extracts video transcripts as an additional source.
 
 At least one API key is required. X search works automatically if you're logged into x.com in your browser. YouTube search activates automatically when yt-dlp is in your PATH.
+
+## Troubleshooting
+
+### macOS: SSL Certificate Verify Failed
+
+If you see `[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate`, your Python installation is missing SSL root certificates. This only affects Python installed from python.org — **Homebrew users are not affected**.
+
+```bash
+# Check which Python you have
+which python3
+# Homebrew: /opt/homebrew/bin/python3 or /usr/local/bin/python3
+# Python.org: /Library/Frameworks/Python.framework/...
+
+# Fix: run the certificate installer (adjust version as needed)
+sudo "/Applications/Python 3.12/Install Certificates.command"
+```
 
 ## How It Works
 
@@ -869,6 +915,8 @@ At least one API key is required. X search works automatically if you're logged 
 - OpenAI Responses API with `web_search` tool scoped to reddit.com
 - Vendored Twitter GraphQL search (or xAI API fallback) for X search
 - YouTube search + transcript extraction via yt-dlp (when installed)
+- Hacker News search via Algolia API (free, no auth)
+- Polymarket prediction market search via Gamma API (free, no auth)
 - WebSearch for blogs, news, docs, tutorials
 - Reddit JSON enrichment for real engagement metrics (upvotes, comments)
 - Scoring algorithm weighing recency, relevance, and engagement
@@ -889,17 +937,105 @@ If your OpenAI org doesn't have access to a model (e.g., unverified for gpt-4.1)
 
 ---
 
-## What's New in V2
+## What's New in V2.7
 
-### Way better X and Reddit results
+### TikTok as a source
 
-V2 finds significantly more content than V1. Two major improvements:
+**See what's going viral on TikTok.** Search any topic and get the top TikTok videos with views, likes, hashtags, and extracted captions — scored and ranked alongside all other sources. Cross-source convergence detection catches when the same story trends on TikTok AND Reddit AND X.
 
-**Smarter query construction** - V1 sent overly specific queries to X search (literal keyword AND matching), causing 0 results on topics that were actively trending. V2 aggressively strips research/meta words ("best", "prompt", "techniques", "tips") and question prefixes ("what are people saying about") to extract just the core topic. Example: `"vibe motion best prompt techniques"` now searches for `"vibe motion"` instead of `"vibe motion prompt techniques"`  - going from 0 posts to 12+. Automatically retries with fewer keywords if the first attempt returns nothing.
+Search "Iran Israel" and you get:
+- 🎵 TikTok: 12 videos │ 61,618,200 views │ 2,645,694 likes │ 5 with captions
+- @suaradotcom: 20.1M views — Iranian missiles striking Tel Aviv
+- @itvnews: 14.7M views — Missile getting through Iron Dome
+- @bbcnews: 12.5M views — US and Israel struck Iran, killing Khamenei
 
-**Smart supplemental search (Phase 2)** - After the initial broad search, extracts key @handles and subreddits from the results, then runs targeted follow-up searches to find content that keyword search alone misses. Example: researching "Open Claw" automatically discovers @openclaw, @steipete and drills into their posts. For Reddit, it hits the free `.json` search endpoint scoped to discovered subreddits  - no extra API keys needed.
+Search "Leah Halton" and TikTok is the primary signal:
+- 🎵 TikTok: 15 videos │ 152.6M views │ 10.9M likes │ 5 with captions
+- @looooooooch: 108.8M views — her "Recreation #Inverted" viral hit
+- @allyouseeisai: 17.7M views — AI-generated content of her
 
-**Reddit JSON enrichment** - Fetches real upvote and comment counts from Reddit's free API for every thread, giving you actual engagement signals instead of estimates.
+**Powered by [Apify](https://apify.com)** — sign up for free ($5/month credits, no credit card) and add your token:
+
+```bash
+echo 'APIFY_API_TOKEN=apify_api_...' >> ~/.config/last30days/.env
+```
+
+The shared Apify client wrapper is designed for future Facebook and Instagram sources using the same token.
+
+---
+
+## What's New in V2.5
+
+### Polymarket prediction markets and Hacker News
+
+**The killer feature: see what people are betting real money on.** Polymarket prediction markets are searched for any topic, surfacing live odds, 24-hour volume, liquidity, and price movements alongside what people are saying on Reddit/X/YouTube/HN.
+
+Search "Arizona Basketball" and you get:
+- NCAA Tournament Winner - Arizona: 12% (30 open markets, $1.2M volume)
+- #1 Seed in NCAA Tournament - Arizona: 88% (20 open markets)
+- Big 12 Regular Season Champion - Arizona: 69%
+
+Search "Iran War" and you get 15 live prediction markets: US strikes by March (70%), War Powers resolution (60%), Khamenei out by March 31 (18%), war declaration (2%).
+
+**Two-pass query expansion with tag-based domain bridging** discovers markets the Gamma API can't find through title search alone. When your topic is an *outcome* buried inside a broader market (e.g., "Arizona" is a betting option inside "NCAA Tournament Winner"), the first pass searches all individual topic words in parallel, extracts structured category tags from the results (like "NCAA CBB", "Geopolitics"), then runs a second-pass search on those domain indicators. The result: markets that are invisible to keyword search become discoverable through domain context.
+
+**Neg-risk binary market synthesis** handles Polymarket's multi-outcome events (where each team/entity is a separate Yes/No market). The engine detects the binary sub-market pattern, extracts entity names from market questions, and synthesizes a unified outcome display - showing "Arizona: 12%, Duke: 18%, Houston: 15%" instead of raw "Yes: 12%, No: 88%" for each sub-market.
+
+**Hacker News as a source** - HN stories, Show HN posts, and Ask HN threads are searched via the Algolia API, scored by points + comments, and synthesized alongside all other sources. Comment insights are extracted from top threads to surface the technical community's actual take. HN items participate in cross-source convergence detection - when the same topic trends on HN AND Reddit AND YouTube, that signal gets flagged.
+
+No API keys required for either source. Inspired by community PRs from [@ARJ999](https://github.com/ARJ999) ([#12](https://github.com/mvanhorn/last30days-skill/pull/12)) and [@wkbaran](https://github.com/wkbaran) ([#26](https://github.com/mvanhorn/last30days-skill/pull/26)), with [@gbessoni](https://github.com/gbessoni) endorsing HN as the right addition.
+
+### Multi-signal quality-ranked relevance scoring
+
+**Every result across all seven sources runs through a composite scoring pipeline.** V2.5 doesn't just find more content - it ranks it with significantly higher precision.
+
+**Text similarity engine** - Bidirectional substring matching with synonym expansion ("hip hop" matches "rap", "MacBook" matches "Mac", "AI video" matches "text to video") and token-level overlap scoring. A rap music mix titled "Lit Hip Hop Mix 2026" went from relevance 0.33 (almost filtered out) to 0.71. Title + transcript matching catches videos that discuss your topic without mentioning it in the title.
+
+**Polymarket 5-factor weighted composite** - Markets are ranked by text relevance (30%), 24-hour trading volume (30%), liquidity depth (15%), price movement velocity (15%), and outcome competitiveness (10%). Outcome-aware scoring matches your topic against individual market positions using bidirectional substring matching and token overlap - not just event titles. A market with your topic at 88% probability ranks higher than one where it's at 2%.
+
+**Cross-platform convergence detection** - When the same story appears on multiple platforms, the skill flags it with `[also on: Reddit, HN]` or `[also on: X, YouTube]`. Uses hybrid similarity (character trigram Jaccard + token Jaccard) to detect matches even when titles differ across platforms. These cross-platform signals are the strongest evidence that something actually matters.
+
+**Channel authority weighting** - Boosts results from established creators. Source-specific engagement normalization ensures a 500-upvote Reddit thread and a 5,000-like X post are compared on equal footing.
+
+### Blinded quality comparison
+
+Ran a 15-way blinded comparison across 5 topics (Claude Code, Seedance, MacBook Pro, rap songs, React vs Svelte). Three versions, labels stripped, randomized as A/B/C:
+
+| Version | Score |
+|---------|-------|
+| v2.5 (Polymarket + HN + scoring) | 4.38/5.0 |
+| v2 (with HN) | 4.10/5.0 |
+| v1 (original) | 3.73/5.0 |
+
+Scored on groundedness (30%), specificity (25%), coverage (20%), actionability (15%), format (10%). The relative ranking is meaningful; absolute numbers are LLM-grading-LLM and shouldn't be taken as objective quality scores. The biggest gains came from prediction market data and detecting where sources agree.
+
+### X handle resolution
+
+Search "Dor Brothers" and the skill resolves their handle (@thedorbrothers), then searches their posts directly with no topic filter. Their viral tweet - "We made a $300M movie starring @LoganPaul with AI in less than 7 days" (5,600+ likes) - never says "Dor Brothers" in the text. Keyword search can't find it. Handle resolution can. Result: 40 X posts (6,900+ likes) instead of 30 (161 likes). Works for people, brands, products, and tools. [Details below.](#x-handle-resolution-details)
+
+### X handle resolution details
+
+The problem: when you search a topic on X, you find posts *about* it. But the topic's own account often doesn't mention its own name in tweets. Keyword search can't find those posts.
+
+The solution: before running the search, the skill does one WebSearch to resolve the topic's X handle. It finds the handle, then searches their posts directly with no topic filter - catching viral posts keyword search misses entirely.
+
+Works for people, brands, products, and tools - anything that might have an X account. The skill verifies handles aren't parody or fan accounts before using them. If no official account exists (like Seedance, which doesn't have one), it skips gracefully.
+
+**How it works:**
+
+```
+1. Agent WebSearches "{topic} X twitter handle site:x.com"
+2. Extracts and verifies the handle from results
+3. Passes --x-handle={handle} to the search engine
+4. Engine searches from:{handle} with no topic keywords (unfiltered)
+5. Results merged with keyword search, deduplicated, scored
+```
+
+No extra API keys needed - uses the agent's built-in WebSearch (available to 100% of users).
+
+---
+
+## What's New in V2.1
 
 ### Open-class skill with watchlists (v2.1)
 
@@ -923,7 +1059,7 @@ Inspired by [Peter Steinberger](https://x.com/steipete)'s yt-dlp + [summarize](h
 
 **X search is fully self-contained** - No external `bird` CLI or xAI API key needed. /last30days bundles a vendored subset of Bird's Twitter GraphQL client (MIT licensed, by Peter Steinberger). Just be logged into x.com in your browser and it auto-detects your session. Falls back to xAI API if bundled search can't authenticate.
 
-### Everything else
+### Everything else (v2.1)
 
 **`--days=N` flag** - Configurable lookback window. `/last30days topic --days=7` for a weekly roundup, `--days=14` for two weeks.
 
@@ -934,6 +1070,20 @@ Inspired by [Peter Steinberger](https://x.com/steipete)'s yt-dlp + [summarize](h
 **Citation priority** - Cites @handles from X and r/subreddits over web sources, because the skill's value is surfacing what *people* are saying, not what journalists wrote.
 
 **Marketplace plugin support** - Ships with `.claude-plugin/plugin.json` for Claude Code marketplace compatibility. (Inspired by [@galligan](https://github.com/galligan)'s PR)
+
+---
+
+## What's New in V2
+
+### Way better X and Reddit results
+
+V2 finds significantly more content than V1. Two major improvements:
+
+**Smarter query construction** - V1 sent overly specific queries to X search (literal keyword AND matching), causing 0 results on topics that were actively trending. V2 aggressively strips research/meta words ("best", "prompt", "techniques", "tips") and question prefixes ("what are people saying about") to extract just the core topic. Example: `"vibe motion best prompt techniques"` now searches for `"vibe motion"` instead of `"vibe motion prompt techniques"` - going from 0 posts to 12+. Automatically retries with fewer keywords if the first attempt returns nothing.
+
+**Smart supplemental search (Phase 2)** - After the initial broad search, extracts key @handles and subreddits from the results, then runs targeted follow-up searches to find content that keyword search alone misses. Example: researching "Open Claw" automatically discovers @openclaw, @steipete and drills into their posts. For Reddit, it hits the free `.json` search endpoint scoped to discovered subreddits - no extra API keys needed.
+
+**Reddit JSON enrichment** - Fetches real upvote and comment counts from Reddit's free API for every thread, giving you actual engagement signals instead of estimates.
 
 ### Community contributions
 
@@ -955,6 +1105,9 @@ Thanks to the contributors who helped shape V2:
 | `reddit.com` | Thread URLs for enrichment | None (public JSON) |
 | Twitter GraphQL / `api.x.ai` | Search query | Browser cookies or XAI_API_KEY |
 | `youtube.com` (via yt-dlp) | Search query | None (public search) |
+| `hn.algolia.com` | Search query | None (public API) |
+| `gamma-api.polymarket.com` | Search query | None (public API) |
+| `api.apify.com` | Search query (TikTok) | APIFY_API_TOKEN |
 | `api.search.brave.com` | Search query (optional) | BRAVE_API_KEY |
 | `api.parallel.ai` | Search query (optional) | PARALLEL_API_KEY |
 | `openrouter.ai` | Search query (optional) | OPENROUTER_API_KEY |
@@ -973,6 +1126,6 @@ Each API key is transmitted only to its respective endpoint. Your OpenAI key is 
 
 ---
 
-*30 days of research. 30 seconds of work. Four sources. Zero stale prompts.*
+*30 days of research. 30 seconds of work. Seven sources. Zero stale prompts.*
 
-*Pair with [Open Claw](https://github.com/openclaw/openclaw) for automated watchlists and briefings. Reddit. X. YouTube. Web.  - All synthesized into expert answers and copy-paste prompts.*
+*Pair with [Open Claw](https://github.com/openclaw/openclaw) for automated watchlists and briefings. Reddit. X. YouTube. TikTok. Web.  - All synthesized into expert answers and copy-paste prompts.*

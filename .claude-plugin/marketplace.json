@@ -1,4 +1,5 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "last30days",
   "owner": {
     "name": "mvanhorn",
@@ -11,7 +12,7 @@
   "plugins": [
     {
       "name": "last30days",
-      "source": "."
+      "source": "./"
     }
   ]
 }

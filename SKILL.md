@@ -1,12 +1,11 @@
 ---
 name: last30days
-version: "2.1"
-description: "Research a topic from the last 30 days. Also triggered by 'last30'. Sources: Reddit, X, YouTube, web. Become an expert and write copy-paste-ready prompts."
+version: "2.7"
+description: "Research a topic from the last 30 days. Also triggered by 'last30'. Sources: Reddit, X, YouTube, TikTok, Hacker News, Polymarket, web. Become an expert and write copy-paste-ready prompts."
 argument-hint: 'last30 AI video tools, last30 best project management tools'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
 homepage: https://github.com/mvanhorn/last30days-skill
 user-invocable: true
-disable-model-invocation: true
 metadata:
   clawdbot:
     emoji: "📰"
@@ -25,13 +24,15 @@ metadata:
       - reddit
       - x
       - youtube
+      - tiktok
+      - hackernews
       - trends
       - prompts
 ---
 
-# last30days v2.1: Research Any Topic from the Last 30 Days
+# last30days v2.7: Research Any Topic from the Last 30 Days
 
-Research ANY topic across Reddit, X, YouTube, and the web. Surface what people are actually discussing, recommending, and debating right now.
+Research ANY topic across Reddit, X, YouTube, TikTok, Hacker News, Polymarket, and the web. Surface what people are actually discussing, recommending, betting on, and debating right now.
 
 ## CRITICAL: Parse User Intent
 
@@ -64,7 +65,7 @@ Common patterns:
 **DISPLAY your parsing to the user.** Before running any tools, output:
 
 ```
-I'll research {TOPIC} across Reddit, X, and the web to find what's been discussed in the last 30 days.
+I'll research {TOPIC} across Reddit, X, TikTok, and the web to find what's been discussed in the last 30 days.
 
 Parsed intent:
 - TOPIC = {TOPIC}
@@ -77,6 +78,66 @@ Research typically takes 2-8 minutes (niche topics take longer). Starting now.
 If TARGET_TOOL is known, mention it in the intro: "...to find {QUERY_TYPE}-style content for use in {TARGET_TOOL}."
 
 This text MUST appear before you call any tools. It confirms to the user that you understood their request.
+
+---
+
+## Step 0.5: Resolve X Handle (if topic could have an X account)
+
+If TOPIC looks like it could have its own X/Twitter account - **people, creators, brands, products, tools, companies, communities** (e.g., "Dor Brothers", "Jason Calacanis", "Nano Banana Pro", "Seedance", "Midjourney"), do ONE quick WebSearch:
+
+```
+WebSearch("{TOPIC} X twitter handle site:x.com")
+```
+
+From the results, extract their X/Twitter handle. Look for:
+- **Verified profile URLs** like `x.com/{handle}` or `twitter.com/{handle}`
+- Mentions like "@handle" in bios, articles, or social profiles
+- "Follow @handle on X" patterns
+
+**Verify the account is real, not a parody/fan account.** Check for:
+- Verified/blue checkmark in the search results
+- Official website linking to the X account
+- Consistent naming (e.g., @thedorbrothers for "The Dor Brothers", not @DorBrosFan)
+- If results only show fan/parody/news accounts (not the entity's own account), skip - the entity may not have an X presence
+
+If you find a clear, verified handle, pass it as `--x-handle={handle}` (without @). This searches that account's posts directly - finding content they posted that doesn't mention their own name.
+
+**Skip this step if:**
+- TOPIC is clearly a generic concept, not an entity (e.g., "best rap songs 2026", "how to use Docker", "AI ethics debate")
+- TOPIC already contains @ (user provided the handle directly)
+- Using `--quick` depth
+- WebSearch shows no official X account exists for this entity
+
+Store: `RESOLVED_HANDLE = {handle or empty}`
+
+---
+
+## Agent Mode (--agent flag)
+
+If `--agent` appears in ARGUMENTS (e.g., `/last30days plaud granola --agent`):
+
+1. **Skip** the intro display block ("I'll research X across Reddit...")
+2. **Skip** any `AskUserQuestion` calls - use `TARGET_TOOL = "unknown"` if not specified
+3. **Run** the research script and WebSearch exactly as normal
+4. **Skip** the "WAIT FOR USER RESPONSE" pause
+5. **Skip** the follow-up invitation ("I'm now an expert on X...")
+6. **Output** the complete research report and stop - do not wait for further input
+
+Agent mode report format:
+
+```
+## Research Report: {TOPIC}
+Generated: {date} | Sources: Reddit, X, YouTube, TikTok, HN, Polymarket, Web
+
+### Key Findings
+[3-5 bullet points, highest-signal insights with citations]
+
+### What I learned
+{The full "What I learned" synthesis from normal output}
+
+### Stats
+{The standard stats block}
+```
 
 ---
 
@@ -104,19 +165,21 @@ if [ -z "${SKILL_ROOT:-}" ]; then
   exit 1
 fi
 
-python3 "${SKILL_ROOT}/scripts/last30days.py" "$ARGUMENTS" --emit=compact
+python3 "${SKILL_ROOT}/scripts/last30days.py" "$ARGUMENTS" --emit=compact --no-native-web  # Add --x-handle=HANDLE if RESOLVED_HANDLE is set
 ```
 
 Use a **timeout of 300000** (5 minutes) on the Bash call. The script typically takes 1-3 minutes.
 
 The script will automatically:
 - Detect available API keys
-- Run Reddit/X/YouTube searches
-- Output ALL results including YouTube transcripts
+- Run Reddit/X/YouTube/TikTok/Hacker News/Polymarket searches
+- Output ALL results including YouTube transcripts, TikTok captions, HN comments, and prediction market odds
 
-**Read the ENTIRE output.** It contains THREE data sections in this order: Reddit items, X items, and YouTube items. If you miss the YouTube section, you will produce incomplete stats.
+**Read the ENTIRE output.** It contains SEVEN data sections in this order: Reddit items, X items, YouTube items, TikTok items, Hacker News items, Polymarket items, and WebSearch items. If you miss sections, you will produce incomplete stats.
 
 **YouTube items in the output look like:** `**{video_id}** (score:N) {channel_name} [N views, N likes]` followed by a title, URL, and optional transcript snippet. Count them and include them in your synthesis and stats block.
+
+**TikTok items in the output look like:** `**{TK_id}** (score:N) @{creator} [N views, N likes]` followed by a caption, URL, hashtags, and optional caption snippet. Count them and include them in your synthesis and stats block.
 
 ---
 
@@ -153,7 +216,9 @@ For ALL query types:
 - **USE THE USER'S EXACT TERMINOLOGY** - don't substitute or add tech names based on your knowledge
 - EXCLUDE reddit.com, x.com, twitter.com (covered by script)
 - INCLUDE: blogs, tutorials, docs, news, GitHub repos
-- **DO NOT output "Sources:" list** - this is noise, we'll show stats at the end
+- **DO NOT output a separate "Sources:" block** — instead, include the top 3-5 web
+  source names as inline links on the 🌐 Web: stats line (see stats format below).
+  The WebSearch tool requires citation; satisfy it there, not as a trailing section.
 
 **Options** (passed through from user's command):
 - `--days=N` → Look back N days instead of 30 (e.g., `--days=7` for weekly roundup)
@@ -170,10 +235,35 @@ For ALL query types:
 The Judge Agent must:
 1. Weight Reddit/X sources HIGHER (they have engagement signals: upvotes, likes)
 2. Weight YouTube sources HIGH (they have views, likes, and transcript content)
-3. Weight WebSearch sources LOWER (no engagement data)
+3. Weight TikTok sources HIGH (they have views, likes, and caption content — viral signal)
+4. Weight WebSearch sources LOWER (no engagement data)
 4. Identify patterns that appear across ALL sources (strongest signals)
 5. Note any contradictions between sources
 6. Extract the top 3-5 actionable insights
+
+7. **Cross-platform signals are the strongest evidence.** When items have `[also on: Reddit, HN]` or similar tags, it means the same story appears across multiple platforms. Lead with these cross-platform findings - they're the most important signals in the research.
+
+### Prediction Markets (Polymarket)
+
+**CRITICAL: When Polymarket returns relevant markets, prediction market odds are among the highest-signal data points in your research.** Real money on outcomes cuts through opinion. Treat them as strong evidence, not an afterthought.
+
+**How to interpret and synthesize Polymarket data:**
+
+1. **Prefer structural/long-term markets over near-term deadlines.** Championship odds > regular season title. Regime change > near-term strike deadline. IPO/major milestone > incremental update. Presidency > individual state primary. When multiple markets exist, the bigger question is more interesting to the user.
+
+2. **When the topic is an outcome in a multi-outcome market, call out that specific outcome's odds and movement.** Don't just say "Polymarket has a #1 seed market" - say "Arizona has a 28% chance of being the #1 overall seed, up 10% this month." The user cares about THEIR topic's position in the market.
+
+3. **Weave odds into the narrative as supporting evidence.** Don't isolate Polymarket data in its own paragraph. Instead: "Final Four buzz is building - Polymarket gives Arizona a 12% chance to win the championship (up 3% this week), and 28% to earn a #1 seed."
+
+4. **Citation format:** Always include specific odds AND movement. "Polymarket has Arizona at 28% for a #1 seed (up 10% this month)" - not just "per Polymarket."
+
+5. **When multiple relevant markets exist, highlight 3-5 of the most interesting ones** in your synthesis, ordered by importance (structural > near-term). Don't just pick the highest-volume one.
+
+**Domain examples of market importance ranking:**
+- **Sports:** Championship/tournament odds > conference title > regular season > weekly matchup
+- **Geopolitics:** Regime change/structural outcomes > near-term strike deadlines > sanctions
+- **Tech/Business:** IPO, major product launch, company milestones > incremental updates
+- **Elections:** Presidency > primary > individual state
 
 **Do NOT display stats here - they come at the end, right before the invitation.**
 
@@ -255,7 +345,10 @@ CITATION PRIORITY (most to least preferred):
 1. @handles from X — "per @handle" (these prove the tool's unique value)
 2. r/subreddits from Reddit — "per r/subreddit"
 3. YouTube channels — "per [channel name] on YouTube" (transcript-backed insights)
-4. Web sources — ONLY when Reddit/X/YouTube don't cover that specific fact
+4. TikTok creators — "per @creator on TikTok" (viral/trending signal)
+5. HN discussions — "per HN" or "per hn/username" (developer community signal)
+6. Polymarket — "Polymarket has X at Y% (up/down Z%)" with specific odds and movement
+7. Web sources — ONLY when Reddit/X/YouTube/TikTok/HN/Polymarket don't cover that specific fact
 
 The tool's value is surfacing what PEOPLE are saying, not what journalists wrote.
 When both a web article and an X post cover the same fact, cite the X post.
@@ -305,13 +398,17 @@ KEY PATTERNS from the research:
 ├─ 🟠 Reddit: {N} threads │ {N} upvotes │ {N} comments
 ├─ 🔵 X: {N} posts │ {N} likes │ {N} reposts
 ├─ 🔴 YouTube: {N} videos │ {N} views │ {N} with transcripts
-├─ 🌐 Web: {N} pages (supplementary)
+├─ 🎵 TikTok: {N} videos │ {N} views │ {N} likes │ {N} with captions
+├─ 🟡 HN: {N} stories │ {N} points │ {N} comments
+├─ 📊 Polymarket: {N} markets │ {short summary of up to 5 most relevant market odds, e.g. "Championship: 12%, #1 Seed: 28%, Big 12: 64%, vs Kansas: 71%"}
+├─ 🌐 Web: {N} pages — Source Name, Source Name, Source Name
 └─ 🗣️ Top voices: @{handle1} ({N} likes), @{handle2} │ r/{sub1}, r/{sub2}
 ---
 ```
 
-If Reddit returned 0 threads, write: "├─ 🟠 Reddit: 0 threads (no results this cycle)"
-If YouTube returned 0 videos or yt-dlp is not installed, omit the YouTube line entirely.
+**WebSearch citation note:** The WebSearch tool requires source citation. This requirement is satisfied by naming the web sources on the 🌐 Web: line above (plain names, no URLs — URLs wrap badly in terminals). Do NOT append a separate "Sources:" section after the invitation.
+
+**CRITICAL: Omit any source line that returned 0 results.** Do NOT show "0 threads", "0 stories", "0 markets", or "(no results this cycle)". If a source found nothing, DELETE that line entirely - don't include it at all.
 NEVER use plain text dashes (-) or pipe (|). ALWAYS use ├─ └─ │ and the emoji.
 
 **SELF-CHECK before displaying**: Re-read your "What I learned" section. Does it match what the research ACTUALLY says? If you catch yourself projecting your own knowledge instead of the research, rewrite it.
@@ -473,7 +570,7 @@ After delivering a prompt, end with:
 ```
 ---
 📚 Expert in: {TOPIC} for {TARGET_TOOL}
-📊 Based on: {n} Reddit threads ({sum} upvotes) + {n} X posts ({sum} likes) + {n} YouTube videos ({sum} views) + {n} web pages
+📊 Based on: {n} Reddit threads ({sum} upvotes) + {n} X posts ({sum} likes) + {n} YouTube videos ({sum} views) + {n} TikTok videos ({sum} views) + {n} HN stories ({sum} points) + {n} web pages
 
 Want another prompt? Just tell me what you're creating next.
 ```
@@ -485,7 +582,10 @@ Want another prompt? Just tell me what you're creating next.
 **What this skill does:**
 - Sends search queries to OpenAI's Responses API (`api.openai.com`) for Reddit discovery
 - Sends search queries to Twitter's GraphQL API (via browser cookie auth) or xAI's API (`api.x.ai`) for X search
+- Sends search queries to Algolia HN Search API (`hn.algolia.com`) for Hacker News story and comment discovery (free, no auth)
+- Sends search queries to Polymarket Gamma API (`gamma-api.polymarket.com`) for prediction market discovery (free, no auth)
 - Runs `yt-dlp` locally for YouTube search and transcript extraction (no API key, public data)
+- Sends search queries to Apify API (`api.apify.com`) for TikTok search and caption extraction (requires APIFY_API_TOKEN, free tier: $5/month credits)
 - Optionally sends search queries to Brave Search API, Parallel AI API, or OpenRouter API for web search
 - Fetches public Reddit thread data from `reddit.com` for engagement metrics
 - Stores research findings in local SQLite database (watchlist mode only)
@@ -496,7 +596,9 @@ Want another prompt? Just tell me what you're creating next.
 - Does not share API keys between providers (OpenAI key only goes to api.openai.com, etc.)
 - Does not log, cache, or write API keys to output files
 - Does not send data to any endpoint not listed above
-- Cannot be invoked autonomously by the agent (`disable-model-invocation: true`)
+- Hacker News and Polymarket sources are always available (no API key, no binary dependency)
+- TikTok source requires APIFY_API_TOKEN (sign up at apify.com for free $5/month credits, no CC)
+- Can be invoked autonomously by agents via the Skill tool (runs inline, not forked); pass `--agent` for non-interactive report output
 
 **Bundled scripts:** `scripts/last30days.py` (main research engine), `scripts/lib/` (search, enrichment, rendering modules), `scripts/lib/vendor/bird-search/` (vendored X search client, MIT licensed)
 

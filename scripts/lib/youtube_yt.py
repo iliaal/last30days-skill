@@ -17,7 +17,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Depth configurations: how many videos to search / transcribe
 DEPTH_CONFIG = {
@@ -34,6 +34,66 @@ TRANSCRIPT_LIMITS = {
 
 # Max words to keep from each transcript
 TRANSCRIPT_MAX_WORDS = 500
+
+# Stopwords for relevance computation (common English words that dilute token overlap)
+STOPWORDS = frozenset({
+    'the', 'a', 'an', 'to', 'for', 'how', 'is', 'in', 'of', 'on',
+    'and', 'with', 'from', 'by', 'at', 'this', 'that', 'it', 'my',
+    'your', 'i', 'me', 'we', 'you', 'what', 'are', 'do', 'can',
+    'its', 'be', 'or', 'not', 'no', 'so', 'if', 'but', 'about',
+    'all', 'just', 'get', 'has', 'have', 'was', 'will',
+})
+
+
+# Synonym groups for relevance scoring (bidirectional expansion)
+SYNONYMS = {
+    'hip': {'rap', 'hiphop'},
+    'hop': {'rap', 'hiphop'},
+    'rap': {'hip', 'hop', 'hiphop'},
+    'hiphop': {'rap', 'hip', 'hop'},
+    'js': {'javascript'},
+    'javascript': {'js'},
+    'ts': {'typescript'},
+    'typescript': {'ts'},
+    'ai': {'artificial', 'intelligence'},
+    'ml': {'machine', 'learning'},
+    'react': {'reactjs'},
+    'reactjs': {'react'},
+    'svelte': {'sveltejs'},
+    'sveltejs': {'svelte'},
+    'vue': {'vuejs'},
+    'vuejs': {'vue'},
+}
+
+
+def _tokenize(text: str) -> Set[str]:
+    """Lowercase, strip punctuation, remove stopwords, drop single-char tokens.
+    Expands tokens with synonyms for better cross-domain matching."""
+    words = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+    tokens = {w for w in words if w not in STOPWORDS and len(w) > 1}
+    # Expand synonyms
+    expanded = set(tokens)
+    for t in tokens:
+        if t in SYNONYMS:
+            expanded.update(SYNONYMS[t])
+    return expanded
+
+
+def _compute_relevance(query: str, title: str) -> float:
+    """Compute relevance as ratio of query tokens found in title.
+
+    Uses ratio overlap (intersection / query_length) so short queries
+    score higher when fully represented in the title. Floors at 0.1.
+    """
+    q_tokens = _tokenize(query)
+    t_tokens = _tokenize(title)
+
+    if not q_tokens:
+        return 0.5  # Neutral fallback for empty/stopword-only queries
+
+    overlap = len(q_tokens & t_tokens)
+    ratio = overlap / len(q_tokens)
+    return max(0.1, min(1.0, ratio))
 
 
 def _log(msg: str):
@@ -183,8 +243,8 @@ def search_youtube(
                 "comments": comment_count,
             },
             "duration": video.get("duration"),
-            "relevance": 0.7,  # Default; no LLM relevance scoring for YouTube
-            "why_relevant": f"YouTube video about {core_topic}",
+            "relevance": _compute_relevance(core_topic, video.get("title", "")),
+            "why_relevant": f"YouTube: {video.get('title', core_topic)[:60]}",
         })
 
     # Soft date filter: prefer recent items but fall back to all if too few

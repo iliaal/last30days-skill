@@ -22,6 +22,13 @@ class Engagement:
     # YouTube fields
     views: Optional[int] = None
 
+    # TikTok / Facebook fields
+    shares: Optional[int] = None
+
+    # Polymarket fields
+    volume: Optional[float] = None
+    liquidity: Optional[float] = None
+
     def to_dict(self) -> Dict[str, Any]:
         d = {}
         if self.score is not None:
@@ -40,6 +47,12 @@ class Engagement:
             d['quotes'] = self.quotes
         if self.views is not None:
             d['views'] = self.views
+        if self.shares is not None:
+            d['shares'] = self.shares
+        if self.volume is not None:
+            d['volume'] = self.volume
+        if self.liquidity is not None:
+            d['liquidity'] = self.liquidity
         return d if d else None
 
 
@@ -93,9 +106,10 @@ class RedditItem:
     why_relevant: str = ""
     subs: SubScores = field(default_factory=SubScores)
     score: int = 0
+    cross_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             'id': self.id,
             'title': self.title,
             'url': self.url,
@@ -110,6 +124,9 @@ class RedditItem:
             'subs': self.subs.to_dict(),
             'score': self.score,
         }
+        if self.cross_refs:
+            d['cross_refs'] = self.cross_refs
+        return d
 
 
 @dataclass
@@ -126,9 +143,10 @@ class XItem:
     why_relevant: str = ""
     subs: SubScores = field(default_factory=SubScores)
     score: int = 0
+    cross_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             'id': self.id,
             'text': self.text,
             'url': self.url,
@@ -141,6 +159,9 @@ class XItem:
             'subs': self.subs.to_dict(),
             'score': self.score,
         }
+        if self.cross_refs:
+            d['cross_refs'] = self.cross_refs
+        return d
 
 
 @dataclass
@@ -157,9 +178,10 @@ class WebSearchItem:
     why_relevant: str = ""
     subs: SubScores = field(default_factory=SubScores)
     score: int = 0
+    cross_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             'id': self.id,
             'title': self.title,
             'url': self.url,
@@ -172,6 +194,9 @@ class WebSearchItem:
             'subs': self.subs.to_dict(),
             'score': self.score,
         }
+        if self.cross_refs:
+            d['cross_refs'] = self.cross_refs
+        return d
 
 
 @dataclass
@@ -189,9 +214,10 @@ class YouTubeItem:
     why_relevant: str = ""
     subs: SubScores = field(default_factory=SubScores)
     score: int = 0
+    cross_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             'id': self.id,
             'title': self.title,
             'url': self.url,
@@ -205,6 +231,132 @@ class YouTubeItem:
             'subs': self.subs.to_dict(),
             'score': self.score,
         }
+        if self.cross_refs:
+            d['cross_refs'] = self.cross_refs
+        return d
+
+
+@dataclass
+class TikTokItem:
+    """Normalized TikTok item."""
+    id: str                    # video_id
+    text: str                  # caption/description
+    url: str                   # webVideoUrl
+    author_name: str           # authorMeta.name
+    date: Optional[str] = None
+    date_confidence: str = "high"  # Apify provides exact timestamps
+    engagement: Optional[Engagement] = None  # views, likes, num_comments, shares
+    caption_snippet: str = ""  # spoken-word caption (if available), else text
+    hashtags: List[str] = field(default_factory=list)
+    relevance: float = 0.7
+    why_relevant: str = ""
+    subs: SubScores = field(default_factory=SubScores)
+    score: int = 0
+    cross_refs: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
+            'id': self.id,
+            'text': self.text,
+            'url': self.url,
+            'author_name': self.author_name,
+            'date': self.date,
+            'date_confidence': self.date_confidence,
+            'engagement': self.engagement.to_dict() if self.engagement else None,
+            'caption_snippet': self.caption_snippet,
+            'hashtags': self.hashtags,
+            'relevance': self.relevance,
+            'why_relevant': self.why_relevant,
+            'subs': self.subs.to_dict(),
+            'score': self.score,
+        }
+        if self.cross_refs:
+            d['cross_refs'] = self.cross_refs
+        return d
+
+
+@dataclass
+class HackerNewsItem:
+    """Normalized Hacker News item."""
+    id: str           # "HN1", "HN2", ...
+    title: str
+    url: str          # Original article URL
+    hn_url: str       # news.ycombinator.com/item?id=...
+    author: str       # HN username
+    date: Optional[str] = None
+    date_confidence: str = "high"  # Algolia provides exact timestamps
+    engagement: Optional[Engagement] = None  # points + num_comments
+    top_comments: List[Comment] = field(default_factory=list)
+    comment_insights: List[str] = field(default_factory=list)
+    relevance: float = 0.5
+    why_relevant: str = ""
+    subs: SubScores = field(default_factory=SubScores)
+    score: int = 0
+    cross_refs: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
+            'id': self.id,
+            'title': self.title,
+            'url': self.url,
+            'hn_url': self.hn_url,
+            'author': self.author,
+            'date': self.date,
+            'date_confidence': self.date_confidence,
+            'engagement': self.engagement.to_dict() if self.engagement else None,
+            'top_comments': [c.to_dict() for c in self.top_comments],
+            'comment_insights': self.comment_insights,
+            'relevance': self.relevance,
+            'why_relevant': self.why_relevant,
+            'subs': self.subs.to_dict(),
+            'score': self.score,
+        }
+        if self.cross_refs:
+            d['cross_refs'] = self.cross_refs
+        return d
+
+
+@dataclass
+class PolymarketItem:
+    """Normalized Polymarket prediction market item."""
+    id: str           # "PM1", "PM2", ...
+    title: str        # Event title
+    question: str     # Top market question
+    url: str          # Event page URL
+    outcome_prices: List[tuple] = field(default_factory=list)  # [(name, price), ...]
+    outcomes_remaining: int = 0
+    price_movement: Optional[str] = None  # "down 11.7% this month"
+    date: Optional[str] = None
+    date_confidence: str = "high"  # API provides exact timestamps
+    engagement: Optional[Engagement] = None  # volume + liquidity
+    end_date: Optional[str] = None
+    relevance: float = 0.5
+    why_relevant: str = ""
+    subs: SubScores = field(default_factory=SubScores)
+    score: int = 0
+    cross_refs: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
+            'id': self.id,
+            'title': self.title,
+            'question': self.question,
+            'url': self.url,
+            'outcome_prices': self.outcome_prices,
+            'outcomes_remaining': self.outcomes_remaining,
+            'price_movement': self.price_movement,
+            'date': self.date,
+            'date_confidence': self.date_confidence,
+            'engagement': self.engagement.to_dict() if self.engagement else None,
+            'end_date': self.end_date,
+            'relevance': self.relevance,
+            'why_relevant': self.why_relevant,
+            'subs': self.subs.to_dict(),
+            'score': self.score,
+        }
+        if self.cross_refs:
+            d['cross_refs'] = self.cross_refs
+        return d
 
 
 @dataclass
@@ -221,6 +373,9 @@ class Report:
     x: List[XItem] = field(default_factory=list)
     web: List[WebSearchItem] = field(default_factory=list)
     youtube: List[YouTubeItem] = field(default_factory=list)
+    tiktok: List[TikTokItem] = field(default_factory=list)
+    hackernews: List[HackerNewsItem] = field(default_factory=list)
+    polymarket: List[PolymarketItem] = field(default_factory=list)
     best_practices: List[str] = field(default_factory=list)
     prompt_pack: List[str] = field(default_factory=list)
     context_snippet_md: str = ""
@@ -229,6 +384,11 @@ class Report:
     x_error: Optional[str] = None
     web_error: Optional[str] = None
     youtube_error: Optional[str] = None
+    tiktok_error: Optional[str] = None
+    hackernews_error: Optional[str] = None
+    polymarket_error: Optional[str] = None
+    # Handle resolution
+    resolved_x_handle: Optional[str] = None
     # Cache info
     from_cache: bool = False
     cache_age_hours: Optional[float] = None
@@ -248,10 +408,15 @@ class Report:
             'x': [x.to_dict() for x in self.x],
             'web': [w.to_dict() for w in self.web],
             'youtube': [y.to_dict() for y in self.youtube],
+            'tiktok': [t.to_dict() for t in self.tiktok],
+            'hackernews': [h.to_dict() for h in self.hackernews],
+            'polymarket': [p.to_dict() for p in self.polymarket],
             'best_practices': self.best_practices,
             'prompt_pack': self.prompt_pack,
             'context_snippet_md': self.context_snippet_md,
         }
+        if self.resolved_x_handle:
+            d['resolved_x_handle'] = self.resolved_x_handle
         if self.reddit_error:
             d['reddit_error'] = self.reddit_error
         if self.x_error:
@@ -260,6 +425,12 @@ class Report:
             d['web_error'] = self.web_error
         if self.youtube_error:
             d['youtube_error'] = self.youtube_error
+        if self.tiktok_error:
+            d['tiktok_error'] = self.tiktok_error
+        if self.hackernews_error:
+            d['hackernews_error'] = self.hackernews_error
+        if self.polymarket_error:
+            d['polymarket_error'] = self.polymarket_error
         if self.from_cache:
             d['from_cache'] = self.from_cache
         if self.cache_age_hours is not None:
@@ -296,6 +467,7 @@ class Report:
                 why_relevant=r.get('why_relevant', ''),
                 subs=subs,
                 score=r.get('score', 0),
+                cross_refs=r.get('cross_refs', []),
             ))
 
         # Reconstruct X items
@@ -317,6 +489,7 @@ class Report:
                 why_relevant=x.get('why_relevant', ''),
                 subs=subs,
                 score=x.get('score', 0),
+                cross_refs=x.get('cross_refs', []),
             ))
 
         # Reconstruct Web items
@@ -335,6 +508,7 @@ class Report:
                 why_relevant=w.get('why_relevant', ''),
                 subs=subs,
                 score=w.get('score', 0),
+                cross_refs=w.get('cross_refs', []),
             ))
 
         # Reconstruct YouTube items
@@ -357,6 +531,83 @@ class Report:
                 why_relevant=y.get('why_relevant', ''),
                 subs=subs,
                 score=y.get('score', 0),
+                cross_refs=y.get('cross_refs', []),
+            ))
+
+        # Reconstruct TikTok items
+        tiktok_items = []
+        for t in data.get('tiktok', []):
+            eng = None
+            if t.get('engagement'):
+                eng = Engagement(**t['engagement'])
+            subs = SubScores(**t.get('subs', {})) if t.get('subs') else SubScores()
+            tiktok_items.append(TikTokItem(
+                id=t['id'],
+                text=t.get('text', ''),
+                url=t['url'],
+                author_name=t.get('author_name', ''),
+                date=t.get('date'),
+                date_confidence=t.get('date_confidence', 'high'),
+                engagement=eng,
+                caption_snippet=t.get('caption_snippet', ''),
+                hashtags=t.get('hashtags', []),
+                relevance=t.get('relevance', 0.7),
+                why_relevant=t.get('why_relevant', ''),
+                subs=subs,
+                score=t.get('score', 0),
+                cross_refs=t.get('cross_refs', []),
+            ))
+
+        # Reconstruct HackerNews items
+        hn_items = []
+        for h in data.get('hackernews', []):
+            eng = None
+            if h.get('engagement'):
+                eng = Engagement(**h['engagement'])
+            comments = [Comment(**c) for c in h.get('top_comments', [])]
+            subs = SubScores(**h.get('subs', {})) if h.get('subs') else SubScores()
+            hn_items.append(HackerNewsItem(
+                id=h['id'],
+                title=h['title'],
+                url=h.get('url', ''),
+                hn_url=h.get('hn_url', ''),
+                author=h.get('author', ''),
+                date=h.get('date'),
+                date_confidence=h.get('date_confidence', 'high'),
+                engagement=eng,
+                top_comments=comments,
+                comment_insights=h.get('comment_insights', []),
+                relevance=h.get('relevance', 0.5),
+                why_relevant=h.get('why_relevant', ''),
+                subs=subs,
+                score=h.get('score', 0),
+                cross_refs=h.get('cross_refs', []),
+            ))
+
+        # Reconstruct Polymarket items (backward compat: key may not exist)
+        pm_items = []
+        for p in data.get('polymarket', []):
+            eng = None
+            if p.get('engagement'):
+                eng = Engagement(**p['engagement'])
+            subs = SubScores(**p.get('subs', {})) if p.get('subs') else SubScores()
+            pm_items.append(PolymarketItem(
+                id=p['id'],
+                title=p['title'],
+                question=p.get('question', ''),
+                url=p['url'],
+                outcome_prices=p.get('outcome_prices', []),
+                outcomes_remaining=p.get('outcomes_remaining', 0),
+                price_movement=p.get('price_movement'),
+                date=p.get('date'),
+                date_confidence=p.get('date_confidence', 'high'),
+                engagement=eng,
+                end_date=p.get('end_date'),
+                relevance=p.get('relevance', 0.5),
+                why_relevant=p.get('why_relevant', ''),
+                subs=subs,
+                score=p.get('score', 0),
+                cross_refs=p.get('cross_refs', []),
             ))
 
         return cls(
@@ -371,6 +622,9 @@ class Report:
             x=x_items,
             web=web_items,
             youtube=youtube_items,
+            tiktok=tiktok_items,
+            hackernews=hn_items,
+            polymarket=pm_items,
             best_practices=data.get('best_practices', []),
             prompt_pack=data.get('prompt_pack', []),
             context_snippet_md=data.get('context_snippet_md', ''),
@@ -378,6 +632,10 @@ class Report:
             x_error=data.get('x_error'),
             web_error=data.get('web_error'),
             youtube_error=data.get('youtube_error'),
+            tiktok_error=data.get('tiktok_error'),
+            hackernews_error=data.get('hackernews_error'),
+            polymarket_error=data.get('polymarket_error'),
+            resolved_x_handle=data.get('resolved_x_handle'),
             from_cache=data.get('from_cache', False),
             cache_age_hours=data.get('cache_age_hours'),
         )

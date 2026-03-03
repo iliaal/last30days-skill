@@ -68,9 +68,9 @@ class TestModelFallbackOrder(unittest.TestCase):
         """Fallback list should include gpt-4o."""
         self.assertIn("gpt-4o", MODEL_FALLBACK_ORDER)
 
-    def test_gpt4o_is_first(self):
-        """gpt-4o should be the first fallback option."""
-        self.assertEqual(MODEL_FALLBACK_ORDER[0], "gpt-4o")
+    def test_gpt41_is_first(self):
+        """gpt-4.1 should be the first fallback option."""
+        self.assertEqual(MODEL_FALLBACK_ORDER[0], "gpt-4.1")
 
 
 if __name__ == "__main__":

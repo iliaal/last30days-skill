@@ -86,7 +86,8 @@ def cmd_run_one(args):
         print(json.dumps({"error": f'Topic not found: "{args.topic}"'}))
         sys.exit(1)
 
-    _run_topic(topic)
+    result = _run_topic(topic)
+    print(json.dumps(result, default=str))
 
 
 def cmd_run_all(args):
@@ -132,11 +133,13 @@ def _run_topic(topic: dict) -> dict:
     run_id = store.record_run(topic_id, source_mode="both", status="running")
 
     try:
-        # Run the research script
+        # Prefer custom search_queries over topic name (#40)
+        search_queries = json.loads(topic["search_queries"]) if topic.get("search_queries") else None
+        search_term = search_queries[0] if search_queries else topic["name"]
         cmd = [
             sys.executable,
             str(SCRIPT_DIR / "last30days.py"),
-            topic["name"],
+            search_term,
             "--emit=json",
         ]
         result = subprocess.run(
@@ -186,6 +189,26 @@ def _run_topic(topic: dict) -> dict:
                 "author": item.get("author_handle", ""),
                 "content": item.get("text", ""),
                 "engagement_score": (item.get("engagement") or {}).get("likes", 0),
+                "relevance_score": item.get("relevance", 0),
+            })
+        for item in data.get("youtube", []):
+            findings.append({
+                "source": "youtube",
+                "url": item.get("url", ""),
+                "title": item.get("title", ""),
+                "author": item.get("channel_name", item.get("channel", "")),
+                "content": item.get("transcript_snippet", "") or item.get("title", ""),
+                "engagement_score": (item.get("engagement") or {}).get("views", 0),
+                "relevance_score": item.get("relevance", 0),
+            })
+        for item in data.get("tiktok", []):
+            findings.append({
+                "source": "tiktok",
+                "url": item.get("url", ""),
+                "title": (item.get("caption_snippet", "") or "")[:120],
+                "author": item.get("author", ""),
+                "content": item.get("caption_snippet", ""),
+                "engagement_score": (item.get("engagement") or {}).get("views", 0),
                 "relevance_score": item.get("relevance", 0),
             })
 

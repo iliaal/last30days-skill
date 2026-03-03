@@ -74,8 +74,9 @@ class TestExtractChatgptAccountId(unittest.TestCase):
 
 class TestGetOpenaiAuth(unittest.TestCase):
 
+    @patch.dict(os.environ, {}, clear=True)
     def test_api_key_takes_priority(self):
-        """OPENAI_API_KEY in env file should be preferred over Codex."""
+        """OPENAI_API_KEY in env file is used when env var is not set."""
         file_env = {"OPENAI_API_KEY": "sk-test123"}
         auth = env.get_openai_auth(file_env)
         self.assertEqual(auth.source, "api_key")

@@ -18,6 +18,8 @@ The orchestrator (`last30days.py`) coordinates discovery, enrichment, normalizat
 - **openai_reddit.py**: OpenAI Responses API + web_search for Reddit
 - **xai_x.py**: xAI Responses API + x_search for X
 - **reddit_enrich.py**: Fetch Reddit thread JSON for real engagement metrics
+- **hackernews.py**: Hacker News search via Algolia API (free, no auth)
+- **polymarket.py**: Polymarket prediction market search via Gamma API (free, no auth)
 - **normalize.py**: Convert raw API responses to canonical schema
 - **score.py**: Compute popularity-aware scores (relevance + recency + engagement)
 - **dedupe.py**: Near-duplicate detection via text similarity
