@@ -1,6 +1,6 @@
 ---
-name: last30days-3
-version: "3.0.0-beta"
+name: last30days
+version: "3.0.0"
 description: "Multi-query social search with intelligent planning. Agent plans queries when possible, falls back to Gemini/OpenAI when not. Research any topic across Reddit, X, YouTube, TikTok, Instagram, Hacker News, Polymarket, and the web."
 argument-hint: 'last30days-3 AI video tools, last30days-3 best noise cancelling headphones'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch

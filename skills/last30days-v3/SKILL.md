@@ -1,5 +1,5 @@
 ---
-name: last30days-3
+name: last30days
 version: "3.0.0-alpha"
 description: "[V3 DEV] Research any topic from the last 30 days. Side-by-side test version of the v3 pipeline."
 argument-hint: "last30days-v3 codex vs claude code"
