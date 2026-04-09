@@ -4,6 +4,7 @@ Uses hn.algolia.com/api/v1 for story discovery and comment enrichment.
 No API key needed - just HTTP calls via stdlib urllib.
 """
 
+import datetime
 import html
 import math
 import sys
@@ -11,7 +12,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
-from . import http
+import re
+
+from . import http, log
+from .query import extract_core_subject
+from .relevance import token_overlap_relevance
+
+# Common HN prefixes that can cause false-positive keyword matches
+_HN_PREFIXES = re.compile(r"^(Tell HN|Show HN|Ask HN|Launch HN)\s*:\s*", re.IGNORECASE)
 
 ALGOLIA_SEARCH_URL = "https://hn.algolia.com/api/v1/search"
 ALGOLIA_SEARCH_BY_DATE_URL = "https://hn.algolia.com/api/v1/search_by_date"
@@ -31,25 +39,19 @@ ENRICH_LIMITS = {
 
 
 def _log(msg: str):
-    """Log to stderr (only in TTY mode to avoid cluttering Claude Code output)."""
-    if sys.stderr.isatty():
-        sys.stderr.write(f"[HN] {msg}\n")
-        sys.stderr.flush()
+    log.source_log("HN", msg)
 
 
 def _date_to_unix(date_str: str) -> int:
     """Convert YYYY-MM-DD to Unix timestamp (start of day UTC)."""
     parts = date_str.split("-")
     year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
-    import calendar
-    import datetime
     dt = datetime.datetime(year, month, day, tzinfo=datetime.timezone.utc)
     return int(dt.timestamp())
 
 
 def _unix_to_date(ts: int) -> str:
     """Convert Unix timestamp to YYYY-MM-DD."""
-    import datetime
     dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
     return dt.strftime("%Y-%m-%d")
 
@@ -84,13 +86,17 @@ def search_hackernews(
     from_ts = _date_to_unix(from_date)
     to_ts = _date_to_unix(to_date) + 86400  # Include the end date
 
-    _log(f"Searching for '{topic}' (since {from_date}, count={count})")
+    # Use extracted core subject instead of raw topic for cleaner Algolia matching
+    core = extract_core_subject(topic)
+    _log(f"Searching for '{core}' (raw: '{topic}', since {from_date}, count={count})")
 
-    # Use relevance-sorted search (better for topic matching)
+    # Use relevance-sorted search with minimum engagement filter.
+    # NOTE: restrictSearchableAttributes=title omitted intentionally — it would
+    # miss Ask HN/Show HN threads where the topic appears in the body.
     params = {
-        "query": topic,
+        "query": core,
         "tags": "story",
-        "numericFilters": f"created_at_i>{from_ts},created_at_i<{to_ts}",
+        "numericFilters": f"created_at_i>{from_ts},created_at_i<{to_ts},points>2",
         "hitsPerPage": str(count),
     }
 
@@ -111,13 +117,51 @@ def search_hackernews(
     return response
 
 
-def parse_hackernews_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _title_matches_query(title: str, query: str, author: str = "") -> bool:
+    """Check if the query term appears in the title content, not just an HN prefix or author.
+
+    Returns True if the query (or any multi-word token) appears in the title
+    after stripping "Tell HN:", "Show HN:", "Ask HN:", "Launch HN:" prefixes
+    and ignoring the author name.  Returns True when query is empty (no filter).
+    """
+    if not query:
+        return True
+    stripped = _HN_PREFIXES.sub("", title).strip()
+    # Also check that the match isn't solely in the author's username
+    check_text = stripped.lower()
+    query_lower = query.lower()
+    # Check each word of the query independently; all must appear somewhere
+    # in the stripped title (not just the prefix).
+    query_words = query_lower.split()
+    for word in query_words:
+        if word in check_text:
+            continue
+        # Word not found in stripped title — reject
+        return False
+    return True
+
+
+def parse_hackernews_response(response: Dict[str, Any], query: str = "") -> List[Dict[str, Any]]:
     """Parse Algolia response into normalized item dicts.
+
+    Args:
+        response: Algolia search response
+        query: Original search query for token-overlap relevance scoring
 
     Returns:
         List of item dicts ready for normalization.
     """
     hits = response.get("hits", [])
+    # Post-filter: remove items where query only matched an HN prefix like "Tell HN:"
+    if query:
+        before = len(hits)
+        hits = [
+            h for h in hits
+            if _title_matches_query(h.get("title", ""), query, h.get("author", ""))
+        ]
+        dropped = before - len(hits)
+        if dropped:
+            _log(f"Prefix filter removed {dropped}/{before} false-positive hits for '{query}'")
     items = []
 
     for i, hit in enumerate(hits):
@@ -134,14 +178,17 @@ def parse_hackernews_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
         article_url = hit.get("url") or ""
         hn_url = f"https://news.ycombinator.com/item?id={object_id}"
 
-        # Relevance: Algolia rank position gives a base, engagement boosts it
-        # Position 0 = most relevant from Algolia
+        # Relevance: blend Algolia rank with token-overlap content matching
         rank_score = max(0.3, 1.0 - (i * 0.02))  # 1.0 -> 0.3 over 35 items
         engagement_boost = min(0.2, math.log1p(points) / 40)
-        relevance = min(1.0, rank_score * 0.7 + engagement_boost + 0.1)
+        if query:
+            content_score = token_overlap_relevance(query, hit.get("title", ""))
+            relevance = min(1.0, 0.6 * rank_score + 0.4 * content_score + engagement_boost)
+        else:
+            relevance = min(1.0, rank_score * 0.7 + engagement_boost + 0.1)
 
         items.append({
-            "object_id": object_id,
+            "id": object_id,
             "title": hit.get("title", ""),
             "url": article_url,
             "hn_url": hn_url,
@@ -149,7 +196,7 @@ def parse_hackernews_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
             "date": date_str,
             "engagement": {
                 "points": points,
-                "num_comments": num_comments,
+                "comments": num_comments,
             },
             "relevance": round(relevance, 2),
             "why_relevant": f"HN story about {hit.get('title', 'topic')[:60]}",
@@ -235,7 +282,7 @@ def enrich_top_stories(
         futures = {
             executor.submit(
                 _fetch_item_comments,
-                items[idx]["object_id"],
+                items[idx]["id"],
             ): idx
             for idx in to_enrich
         }
@@ -246,7 +293,8 @@ def enrich_top_stories(
                 result = future.result(timeout=15)
                 items[idx]["top_comments"] = result["comments"]
                 items[idx]["comment_insights"] = result["comment_insights"]
-            except Exception:
+            except (KeyError, TypeError, OSError) as exc:
+                _log(f"Comment enrichment failed for story {items[idx].get('id', '?')}: {type(exc).__name__}: {exc}")
                 items[idx]["top_comments"] = []
                 items[idx]["comment_insights"] = []
 

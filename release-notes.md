@@ -1,52 +1,54 @@
 The AI world reinvents itself every month. This skill keeps you current.
 
-`/last30days` researches your topic across **Reddit, X, YouTube, and the web** from the last 30 days, finds what the community is actually upvoting, sharing, and saying on camera, and writes you a prompt that works today, not six months ago.
+`/last30days` researches your topic across **Reddit, X, YouTube, TikTok, Instagram, Hacker News, Polymarket, and the web** from the last 30 days, finds what the community is actually upvoting, sharing, betting on, and saying on camera, and writes you a grounded narrative with real citations.
 
-## Three Headline Features
+## v3 Community
 
-**1. Open-class skill with watchlists.** Add any topic to a watchlist -- your competitors, specific people, emerging technologies -- and /last30days re-researches it on demand or via cron. Designed for always-on environments like [Open Claw](https://github.com/openclaw/openclaw). SQLite-backed with FTS5 full-text search.
+v3 was shaped by community contributors whose PRs and issues inspired core features. Their code wasn't merged directly (v3 was a ground-up rewrite), but their ideas drove what shipped. See [CONTRIBUTORS.md](CONTRIBUTORS.md) for the full list.
 
-**2. YouTube transcripts as a 4th source.** When yt-dlp is installed, /last30days automatically searches YouTube, grabs view counts, and extracts auto-generated transcripts from the top videos. A 20-minute review contains 10x the signal of a single post -- now the skill reads it. Inspired by [@steipete](https://x.com/steipete)'s yt-dlp + [summarize](https://github.com/steipete/summarize) toolchain.
+Thanks to @uppinote20, @zerone0x, @thinkun, @thomasmktong, @fanispoulinakisai-boop, @pejmanjohn, @zl190, and @hnshah.
 
-**3. Works in OpenAI Codex CLI.** Same skill, same engine, same four sources. Install to `~/.agents/skills/last30days` and invoke with `$last30days`.
+## What's New in v2.9.1
 
-Plus: **Bundled X search** -- vendored Bird GraphQL client (MIT). No external CLI, no npm install, no API keys needed. Just Node.js 22+ and your browser cookies.
+**Auto-save to ~/Documents/Last30Days/.** Every run now saves the complete research briefing - synthesis, stats, and follow-up suggestions - as a topic-named `.md` file to your Documents folder. Build a personal research library without lifting a finger. Inspired by [@devin_explores](https://x.com/devin_explores) who was already doing this manually.
 
-## Real Results (verified Feb 15)
+## Three Headline Features in v2.9
 
-| Topic | Reddit | X | YouTube | Web |
-|-------|--------|---|---------|-----|
-| Nano Banana Pro | -- | 32 posts, 164 likes | 5 videos, 98K views, 5 transcripts | 10 pages |
-| Seedance 2.0 access | 3 threads, 114 upvotes | 31 posts, 191 likes | 20 videos, 685K views, 4 transcripts | 10 pages |
-| OpenClaw use cases | 35 threads, 1,130 upvotes | 23 posts | 20 videos, 1.57M views, 5 transcripts | 10 pages |
-| YouTube thumbnails | 7 threads, 654 upvotes | 32 posts, 110 likes | 18 videos, 6.15M views, 5 transcripts | 30 pages |
-| AI generated ads | 12 threads | 29 posts, 101 likes | 3 videos, 83K views, 3 transcripts | 30 pages |
+**1. ScrapeCreators Reddit as default.** One `SCRAPECREATORS_API_KEY` now covers Reddit, TikTok, and Instagram - three sources, one key. No more `OPENAI_API_KEY` required for Reddit search. Faster, more reliable, and simpler to configure.
+
+**2. Smart subreddit discovery.** Relevance-weighted scoring replaces pure frequency count. Each candidate subreddit is scored by `frequency x recency x topic-word match`, and a `UTILITY_SUBS` blocklist filters noise subs like r/tipofmytongue. Search "Claude Code skills" and get r/ClaudeAI, r/ClaudeCode, r/openclaw - not generic programming subs.
+
+**3. Top comments elevated.** The best comment on each Reddit thread now carries a 10% weight in engagement scoring and displays prominently with upvote counts. Reddit's value is in the comments - now the skill surfaces them.
+
+Plus: **Instagram Reels** (v2.8), **Polymarket prediction markets** (v2.5), **YouTube transcripts** (v2.1), **bundled X search** - no external CLI needed.
+
+## Beta Test Results (v2.9)
+
+| Topic | Time | Threads | Discovered Subreddits |
+|-------|------|---------|----------------------|
+| Claude Code skills | 77.1s | 99 | r/ClaudeAI, r/ClaudeCode, r/openclaw |
+| Kanye West | 71.7s | 84 | r/hiphopheads, r/NFCWestMemeWar, r/Kanye |
+| Anthropic odds | 68.0s | 65 | r/Anthropic, r/ClaudeAI, r/OpenAI |
+| Best rap songs lately | 68.9s | 114 | r/BestofRedditorUpdates, r/rap, r/TeenageRapFans |
+| Nano Banana Pro | 66.6s | 99 | r/GeminiAI, r/nanobanana2pro, r/macbookpro |
 
 ## What's New
 
 ### Added
-- Open-class skill with watchlist, briefing, and history modes
-- YouTube search + transcript extraction via yt-dlp
-- OpenAI Codex CLI compatibility
-- Bundled Twitter/X search (vendored Bird GraphQL, MIT)
-- Native web search backends (Parallel AI, Brave, OpenRouter/Perplexity Sonar Pro)
-- `--diagnose` flag for source status checking
-- `--store` flag for SQLite accumulation
-- Conversational first-run experience (NUX)
+- ScrapeCreators Reddit backend with keyword search and subreddit discovery
+- Smart subreddit discovery with relevance-weighted scoring
+- Utility subreddit blocklist (`UTILITY_SUBS`)
+- Top comment scoring (10% engagement weight) and prominent rendering
+- Comment excerpts increased to 400 chars, insights raised to 10
 
 ### Changed
-- Two-phase search architecture (entity-aware drill-down)
-- Reddit JSON enrichment for real engagement metrics
-- Smarter query construction with auto-retry on 0 results
-- Engagement-weighted scoring (relevance 45%, recency 25%, engagement 30%)
-- `--days=N` configurable lookback (thanks @jonthebeef)
+- `primaryEnv` → `SCRAPECREATORS_API_KEY` (one key for Reddit, TikTok, Instagram)
+- Reddit engagement scoring: `0.55/0.40/0.05` → `0.50/0.35/0.05/0.10`
+- SKILL.md synthesis instructions emphasize quoting top comments
 
 ### Fixed
-- YouTube/Reddit timeout resilience
-- Reddit 429 rate limit fail-fast
-- Eager import crash in Codex environments
-- X search returning 0 results on popular topics
-- Windows Unicode crash (thanks @JosephOIbrahim)
+- Utility sub noise in subreddit discovery
+- Reddit no longer requires `OPENAI_API_KEY`
 
 ## New Contributors
 
@@ -70,4 +72,4 @@ git clone https://github.com/mvanhorn/last30days-skill.git ~/.claude/skills/last
 git clone https://github.com/mvanhorn/last30days-skill.git ~/.agents/skills/last30days
 ```
 
-30 days of research. 30 seconds of work. Four sources. Zero stale prompts.
+30 days of research. 30 seconds of work. Eight sources. Zero stale prompts.

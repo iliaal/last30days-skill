@@ -1,19 +1,24 @@
-"""TikTok search via Apify clockworks/tiktok-scraper for /last30days.
+"""TikTok search via ScrapeCreators API for /last30days.
 
-Uses the Apify platform to search TikTok by keyword, extract engagement
-metrics (views, likes, comments), and optionally pull video captions.
+Uses ScrapeCreators REST API to search TikTok by keyword, extract engagement
+metrics (views, likes, comments, shares), and fetch video transcripts.
 
-Requires APIFY_API_TOKEN in config. Free tier: $5/month credits.
+Requires SCRAPECREATORS_API_KEY in config. 100 free API calls, then PAYG.
+API docs: https://scrapecreators.com/docs
 """
 
 import re
 import sys
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
-from . import apify_client_wrapper
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None
 
-ACTOR_ID = "clockworks/tiktok-scraper"
+from . import dates, http, log
+
+SCRAPECREATORS_BASE = "https://api.scrapecreators.com/v1/tiktok"
 
 # Depth configurations: how many results to fetch / captions to extract
 DEPTH_CONFIG = {
@@ -25,93 +30,13 @@ DEPTH_CONFIG = {
 # Max words to keep from each caption
 CAPTION_MAX_WORDS = 500
 
-# Stopwords for relevance computation (shared with youtube_yt.py pattern)
-STOPWORDS = frozenset({
-    'the', 'a', 'an', 'to', 'for', 'how', 'is', 'in', 'of', 'on',
-    'and', 'with', 'from', 'by', 'at', 'this', 'that', 'it', 'my',
-    'your', 'i', 'me', 'we', 'you', 'what', 'are', 'do', 'can',
-    'its', 'be', 'or', 'not', 'no', 'so', 'if', 'but', 'about',
-    'all', 'just', 'get', 'has', 'have', 'was', 'will',
-})
-
-# Synonym groups for relevance scoring
-SYNONYMS = {
-    'hip': {'rap', 'hiphop'},
-    'hop': {'rap', 'hiphop'},
-    'rap': {'hip', 'hop', 'hiphop'},
-    'hiphop': {'rap', 'hip', 'hop'},
-    'js': {'javascript'},
-    'javascript': {'js'},
-    'ts': {'typescript'},
-    'typescript': {'ts'},
-    'ai': {'artificial', 'intelligence'},
-    'ml': {'machine', 'learning'},
-    'react': {'reactjs'},
-    'reactjs': {'react'},
-}
-
-
-def _tokenize(text: str) -> Set[str]:
-    """Lowercase, strip punctuation, remove stopwords, drop single-char tokens."""
-    words = re.sub(r'[^\w\s]', ' ', text.lower()).split()
-    tokens = {w for w in words if w not in STOPWORDS and len(w) > 1}
-    expanded = set(tokens)
-    for t in tokens:
-        if t in SYNONYMS:
-            expanded.update(SYNONYMS[t])
-    return expanded
-
-
-def _compute_relevance(query: str, text: str, hashtags: List[str] = None) -> float:
-    """Compute relevance as ratio of query tokens found in text + hashtags.
-
-    Uses ratio overlap (intersection / query_length). Hashtags provide
-    a TikTok-specific relevance boost. Floors at 0.1.
-    """
-    q_tokens = _tokenize(query)
-
-    # Combine text and hashtags for matching
-    combined = text
-    if hashtags:
-        combined = f"{text} {' '.join(hashtags)}"
-    t_tokens = _tokenize(combined)
-
-    # Split concatenated hashtags (e.g., "claudecode" → "claude", "code")
-    if hashtags:
-        for tag in hashtags:
-            tag_lower = tag.lower()
-            for qt in q_tokens:
-                if qt in tag_lower and qt != tag_lower:
-                    t_tokens.add(qt)
-
-    if not q_tokens:
-        return 0.5  # Neutral fallback
-
-    overlap = len(q_tokens & t_tokens)
-    ratio = overlap / len(q_tokens)
-    return max(0.1, min(1.0, ratio))
+from .relevance import token_overlap_relevance as _compute_relevance
 
 
 def _extract_core_subject(topic: str) -> str:
-    """Extract core subject from verbose query for TikTok search.
-
-    Strips meta/research words to keep only the core product/concept name.
-    """
-    text = topic.lower().strip()
-
-    # Strip multi-word prefixes
-    prefixes = [
-        'what are the best', 'what is the best', 'what are the latest',
-        'what are people saying about', 'what do people think about',
-        'how do i use', 'how to use', 'how to',
-        'what are', 'what is', 'tips for', 'best practices for',
-    ]
-    for p in prefixes:
-        if text.startswith(p + ' '):
-            text = text[len(p):].strip()
-
-    # Strip individual noise words
-    noise = {
+    """Extract core subject from verbose query for TikTok search."""
+    from .query import extract_core_subject
+    _TIKTOK_NOISE = frozenset({
         'best', 'top', 'good', 'great', 'awesome', 'killer',
         'latest', 'new', 'news', 'update', 'updates',
         'trending', 'hottest', 'popular', 'viral',
@@ -119,118 +44,153 @@ def _extract_core_subject(topic: str) -> str:
         'recommendations', 'advice',
         'prompt', 'prompts', 'prompting',
         'methods', 'strategies', 'approaches',
-    }
-    words = text.split()
-    filtered = [w for w in words if w not in noise]
+    })
+    return extract_core_subject(topic, noise=_TIKTOK_NOISE)
 
-    result = ' '.join(filtered) if filtered else text
-    return result.rstrip('?!.')
+
+def _infer_query_intent(topic: str) -> str:
+    """Tiny local intent classifier for TikTok query expansion."""
+    text = topic.lower().strip()
+    if re.search(r"\b(vs|versus|compare|difference between)\b", text):
+        return "comparison"
+    if re.search(r"\b(how to|tutorial|guide|setup|step by step|deploy|install)\b", text):
+        return "how_to"
+    if re.search(r"\b(thoughts on|worth it|should i|opinion|review)\b", text):
+        return "opinion"
+    if re.search(r"\b(pricing|feature|features|best .* for)\b", text):
+        return "product"
+    return "breaking_news"
+
+
+def expand_tiktok_queries(topic: str, depth: str) -> List[str]:
+    """Generate multiple TikTok search queries from a topic.
+
+    Mirrors reddit.py's expand_reddit_queries() pattern:
+    1. Extract core subject (strip noise words)
+    2. Include original topic if different from core
+    3. Add intent-specific OR-joined content-type variants
+    4. Cap by depth: 1 for quick, 2 for default, 3 for deep
+
+    Returns 1-3 query strings depending on depth.
+    """
+    core = _extract_core_subject(topic)
+    queries = [core]
+
+    # Include cleaned original topic as variant if different from core
+    original_clean = topic.strip().rstrip('?!.')
+    if core.lower() != original_clean.lower() and len(original_clean.split()) <= 8:
+        queries.append(original_clean)
+
+    qtype = _infer_query_intent(topic)
+
+    # Intent-specific TikTok content-type variants
+    if qtype in ("breaking_news", "opinion"):
+        queries.append(f"{core} edit OR reaction OR trend")
+    elif qtype == "product":
+        queries.append(f"{core} review OR haul OR unboxing")
+    elif qtype == "comparison":
+        queries.append(f"{core} vs OR compared OR which is better")
+    elif qtype == "how_to":
+        queries.append(f"{core} tutorial OR hack OR tip")
+    else:
+        queries.append(f"{core} edit OR reaction OR trend")
+
+    # Deep depth: add viral content variant
+    if depth == "deep":
+        queries.append(f"{core} viral OR fyp OR trending")
+
+    # Cap by depth budget
+    caps = {"quick": 1, "default": 2, "deep": 3}
+    cap = caps.get(depth, 2)
+    return queries[:cap]
 
 
 def _log(msg: str):
-    """Log to stderr (only in interactive terminals; spinner handles non-TTY)."""
-    if sys.stderr.isatty():
-        sys.stderr.write(f"[TikTok] {msg}\n")
-        sys.stderr.flush()
+    log.source_log("TikTok", msg)
+
+
+def _sc_headers(token: str) -> Dict[str, str]:
+    """Build ScrapeCreators request headers."""
+    return {
+        "x-api-key": token,
+        "Content-Type": "application/json",
+    }
 
 
 def _parse_date(item: Dict[str, Any]) -> Optional[str]:
-    """Parse date from Apify TikTok item to YYYY-MM-DD.
-
-    Handles both createTimeISO (ISO string) and createTime (unix timestamp).
-    """
-    iso = item.get("createTimeISO")
-    if iso:
-        try:
-            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d")
-        except (ValueError, TypeError):
-            pass
-
-    ts = item.get("createTime")
+    """Parse date from ScrapeCreators TikTok item to YYYY-MM-DD."""
+    ts = item.get("create_time")
     if ts:
         try:
-            dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
-            return dt.strftime("%Y-%m-%d")
-        except (ValueError, TypeError, OSError):
+            return dates.timestamp_to_date(int(ts))
+        except (ValueError, TypeError):
             pass
-
     return None
 
 
-def search_tiktok(
-    topic: str,
-    from_date: str,
-    to_date: str,
-    depth: str = "default",
-    token: str = None,
-) -> Dict[str, Any]:
-    """Search TikTok via Apify.
+def _clean_webvtt(text: str) -> str:
+    """Strip WebVTT timestamps and headers from transcript text."""
+    if not text:
+        return ""
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('WEBVTT'):
+            continue
+        if re.match(r'^\d{2}:\d{2}', line):
+            continue
+        if '-->' in line:
+            continue
+        cleaned.append(line)
+    return ' '.join(cleaned)
 
-    Args:
-        topic: Search topic
-        from_date: Start date (YYYY-MM-DD)
-        to_date: End date (YYYY-MM-DD)
-        depth: 'quick', 'default', or 'deep'
-        token: Apify API token
 
-    Returns:
-        Dict with 'items' list and optional 'error'.
-    """
-    if not token:
-        return {"items": [], "error": "No APIFY_API_TOKEN configured"}
-
-    if not apify_client_wrapper.is_apify_available():
-        return {"items": [], "error": "apify-client not installed (pip install apify-client)"}
-
-    config = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
-    core_topic = _extract_core_subject(topic)
-
-    _log(f"Searching TikTok for '{core_topic}' (depth={depth}, count={config['results_per_page']})")
-
-    try:
-        client = apify_client_wrapper.get_apify_client(token)
-        run_input = {
-            "searchQueries": [core_topic],
-            "resultsPerPage": config["results_per_page"],
-            "shouldDownloadSubtitles": False,
-            "shouldDownloadVideos": False,
-            "shouldDownloadCovers": False,
-        }
-        raw_items = apify_client_wrapper.run_actor_sync(
-            client, ACTOR_ID, run_input,
-            timeout_secs=120,
-            max_items=config["results_per_page"],
-        )
-    except Exception as e:
-        _log(f"Apify error: {e}")
-        return {"items": [], "error": f"{type(e).__name__}: {e}"}
-
-    # Parse items
+def _parse_items(raw_items: List[Dict[str, Any]], core_topic: str) -> List[Dict[str, Any]]:
+    """Parse raw TikTok items into normalized dicts."""
     items = []
     for raw in raw_items:
-        video_id = str(raw.get("id", ""))
-        text = raw.get("text", "")
-        play_count = raw.get("playCount") or 0
-        digg_count = raw.get("diggCount") or 0
-        comment_count = raw.get("commentCount") or 0
-        share_count = raw.get("shareCount") or 0
-        author_meta = raw.get("authorMeta") or {}
-        author_name = author_meta.get("name", "")
-        web_url = raw.get("webVideoUrl", "")
-        hashtags_raw = raw.get("hashtags") or []
-        hashtag_names = [h.get("name", "") for h in hashtags_raw if isinstance(h, dict)]
-        duration = (raw.get("videoMeta") or {}).get("duration")
+        video_id = str(raw.get("aweme_id", ""))
+        text = raw.get("desc", "")
+
+        stats = raw.get("statistics") if isinstance(raw.get("statistics"), dict) else {}
+        play_count = stats.get("play_count") if stats.get("play_count") is not None else 0
+        digg_count = stats.get("digg_count") if stats.get("digg_count") is not None else 0
+        comment_count = stats.get("comment_count") if stats.get("comment_count") is not None else 0
+        share_count = stats.get("share_count") if stats.get("share_count") is not None else 0
+
+        author_raw = raw.get("author")
+        if isinstance(author_raw, dict):
+            author_name = author_raw.get("unique_id", "")
+        elif isinstance(author_raw, str):
+            author_name = author_raw
+        else:
+            author_name = ""
+
+        share_url = raw.get("share_url", "")
+        text_extra = raw.get("text_extra") or []
+        hashtag_names = [t.get("hashtag_name", "") for t in text_extra
+                         if isinstance(t, dict) and t.get("hashtag_name")]
+
+        video_raw = raw.get("video")
+        duration = video_raw.get("duration") if isinstance(video_raw, dict) else None
 
         date_str = _parse_date(raw)
 
         # Compute relevance with hashtag boost
         relevance = _compute_relevance(core_topic, text, hashtag_names)
 
+        # Build URL: prefer share_url, fallback to constructed URL
+        url = share_url.split("?")[0] if share_url else ""
+        if not url and author_name and video_id:
+            url = f"https://www.tiktok.com/@{author_name}/video/{video_id}"
+
         items.append({
             "video_id": video_id,
             "text": text,
-            "url": web_url or f"https://www.tiktok.com/@{author_name}/video/{video_id}",
+            "url": url,
             "author_name": author_name,
             "date": date_str,
             "engagement": {
@@ -245,6 +205,166 @@ def search_tiktok(
             "why_relevant": f"TikTok: {text[:60]}" if text else f"TikTok: {core_topic}",
             "caption_snippet": "",  # populated by fetch_captions
         })
+    return items
+
+
+def _hashtag_search(
+    hashtag: str,
+    token: str,
+) -> List[Dict[str, Any]]:
+    """Search TikTok by hashtag via ScrapeCreators.
+
+    Args:
+        hashtag: Hashtag name (without #)
+        token: ScrapeCreators API key
+
+    Returns:
+        List of raw TikTok item dicts (aweme_info format).
+    """
+    _log(f"Hashtag search: #{hashtag}")
+    if not _requests:
+        try:
+            from urllib.parse import urlencode
+            params = urlencode({"hashtag": hashtag})
+            url = f"{SCRAPECREATORS_BASE}/search/hashtag?{params}"
+            headers = _sc_headers(token)
+            headers["User-Agent"] = http.USER_AGENT
+            data = http.get(url, headers=headers, timeout=30, retries=2)
+        except Exception as e:
+            _log(f"Hashtag search error (urllib) for #{hashtag}: {e}")
+            return []
+    else:
+        try:
+            resp = _requests.get(
+                f"{SCRAPECREATORS_BASE}/search/hashtag",
+                params={"hashtag": hashtag},
+                headers=_sc_headers(token),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            _log(f"Hashtag search error for #{hashtag}: {e}")
+            return []
+
+    raw_items = data.get("aweme_list") or data.get("data") or []
+    _log(f"  -> {len(raw_items)} results for #{hashtag}")
+    return raw_items
+
+
+def _profile_videos(
+    handle: str,
+    token: str,
+    count: int = 10,
+) -> List[Dict[str, Any]]:
+    """Fetch a TikTok creator's recent videos via ScrapeCreators.
+
+    Args:
+        handle: TikTok username (without @)
+        token: ScrapeCreators API key
+        count: Max videos to return
+
+    Returns:
+        List of raw TikTok item dicts (aweme_info format).
+    """
+    _log(f"Profile videos: @{handle}")
+    profile_url = "https://api.scrapecreators.com/v3/tiktok/profile/videos"
+    if not _requests:
+        try:
+            from urllib.parse import urlencode
+            params = urlencode({"handle": handle, "sort_by": "latest"})
+            url = f"{profile_url}?{params}"
+            headers = _sc_headers(token)
+            headers["User-Agent"] = http.USER_AGENT
+            data = http.get(url, headers=headers, timeout=30, retries=2)
+        except Exception as e:
+            _log(f"Profile videos error (urllib) for @{handle}: {e}")
+            return []
+    else:
+        try:
+            resp = _requests.get(
+                profile_url,
+                params={"handle": handle, "sort_by": "latest"},
+                headers=_sc_headers(token),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            _log(f"Profile videos error for @{handle}: {e}")
+            return []
+
+    raw_items = data.get("aweme_list") or data.get("data") or []
+    _log(f"  -> {len(raw_items)} videos from @{handle}")
+    return raw_items[:count]
+
+
+def search_tiktok(
+    topic: str,
+    from_date: str,
+    to_date: str,
+    depth: str = "default",
+    token: str = None,
+) -> Dict[str, Any]:
+    """Search TikTok via ScrapeCreators API.
+
+    Args:
+        topic: Search topic
+        from_date: Start date (YYYY-MM-DD)
+        to_date: End date (YYYY-MM-DD)
+        depth: 'quick', 'default', or 'deep'
+        token: ScrapeCreators API key
+
+    Returns:
+        Dict with 'items' list and optional 'error'.
+    """
+    if not token:
+        return {"items": [], "error": "No SCRAPECREATORS_API_KEY configured"}
+
+    config = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
+    core_topic = _extract_core_subject(topic)
+
+    _log(f"Searching TikTok for '{core_topic}' (depth={depth}, count={config['results_per_page']})")
+
+    if not _requests:
+        _log("requests library not installed, falling back to urllib")
+        try:
+            from urllib.parse import urlencode
+            params = urlencode({"query": core_topic, "sort_by": "relevance"})
+            url = f"{SCRAPECREATORS_BASE}/search/keyword?{params}"
+            headers = _sc_headers(token)
+            headers["User-Agent"] = http.USER_AGENT
+            data = http.get(url, headers=headers, timeout=30, retries=2)
+        except Exception as e:
+            _log(f"ScrapeCreators error (urllib): {e}")
+            return {"items": [], "error": f"{type(e).__name__}: {e}"}
+    else:
+        try:
+            resp = _requests.get(
+                f"{SCRAPECREATORS_BASE}/search/keyword",
+                params={"query": core_topic, "sort_by": "relevance"},
+                headers=_sc_headers(token),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            _log(f"ScrapeCreators error: {e}")
+            return {"items": [], "error": f"{type(e).__name__}: {e}"}
+
+    # Items are nested under aweme_info
+    raw_entries = data.get("search_item_list") or data.get("data") or []
+    raw_items = []
+    for entry in raw_entries:
+        if isinstance(entry, dict):
+            info = entry.get("aweme_info", entry)
+            raw_items.append(info)
+
+    # Limit to configured count
+    raw_items = raw_items[:config["results_per_page"]]
+
+    # Parse items
+    items = _parse_items(raw_items, core_topic)
 
     # Hard date filter
     in_range = [i for i in items if i["date"] and from_date <= i["date"] <= to_date]
@@ -268,24 +388,24 @@ def fetch_captions(
     token: str,
     depth: str = "default",
 ) -> Dict[str, str]:
-    """Fetch captions for top N TikTok videos.
+    """Fetch transcripts for top N TikTok videos via ScrapeCreators.
 
     Strategy:
-    1. Primary: Use the 'text' field (video description) — always free
-    2. For top N, re-run actor with shouldDownloadSubtitles for spoken-word
+    1. Use the 'text' field (video description) as baseline caption
+    2. For top N, call /video/transcript for spoken-word captions
 
     Args:
         video_items: Items from search_tiktok()
-        token: Apify API token
+        token: ScrapeCreators API key
         depth: Depth level for caption limit
 
     Returns:
-        Dict mapping video_id → caption text (truncated to 500 words)
+        Dict mapping video_id -> caption text (truncated to 500 words)
     """
     config = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
     max_captions = config["max_captions"]
 
-    if not video_items or not token:
+    if not video_items or not token or not _requests:
         return {}
 
     top_items = video_items[:max_captions]
@@ -303,35 +423,33 @@ def fetch_captions(
                 text = ' '.join(words[:CAPTION_MAX_WORDS]) + '...'
             captions[vid] = text
 
-    # Second pass: try to get spoken-word subtitles for top videos
-    try:
-        urls = [item["url"] for item in top_items if item.get("url")]
-        if urls:
-            client = apify_client_wrapper.get_apify_client(token)
-            run_input = {
-                "postURLs": urls,
-                "shouldDownloadSubtitles": True,
-                "shouldDownloadVideos": False,
-                "shouldDownloadCovers": False,
-            }
-            subtitle_items = apify_client_wrapper.run_actor_sync(
-                client, ACTOR_ID, run_input,
-                timeout_secs=60,
-                max_items=max_captions,
+    # Second pass: try to get spoken-word transcripts (1 credit each)
+    for item in top_items:
+        vid = item["video_id"]
+        url = item.get("url", "")
+        if not url:
+            continue
+        try:
+            resp = _requests.get(
+                f"{SCRAPECREATORS_BASE}/video/transcript",
+                params={"url": url},
+                headers=_sc_headers(token),
+                timeout=15,
             )
-            for raw in subtitle_items:
-                vid = str(raw.get("id", ""))
-                # Check for subtitle text in the response
-                subtitle_text = raw.get("subtitleText") or raw.get("subtitles") or ""
-                if isinstance(subtitle_text, list):
-                    subtitle_text = " ".join(str(s) for s in subtitle_text)
-                if subtitle_text and vid:
-                    words = subtitle_text.split()
-                    if len(words) > CAPTION_MAX_WORDS:
-                        subtitle_text = ' '.join(words[:CAPTION_MAX_WORDS]) + '...'
-                    captions[vid] = subtitle_text  # Override text with spoken-word
-    except Exception as e:
-        _log(f"Subtitle enrichment failed (using text captions): {e}")
+            if resp.status_code == 200:
+                data = resp.json()
+                transcript = data.get("transcript")
+                if transcript:
+                    if isinstance(transcript, list):
+                        transcript = " ".join(str(s) for s in transcript)
+                    transcript = _clean_webvtt(transcript)
+                    if transcript:
+                        words = transcript.split()
+                        if len(words) > CAPTION_MAX_WORDS:
+                            transcript = ' '.join(words[:CAPTION_MAX_WORDS]) + '...'
+                        captions[vid] = transcript
+        except Exception as e:
+            _log(f"Transcript fetch failed for {vid}: {e}")
 
     got = sum(1 for v in captions.values() if v)
     _log(f"Got captions for {got}/{len(top_items)} videos")
@@ -344,25 +462,70 @@ def search_and_enrich(
     to_date: str,
     depth: str = "default",
     token: str = None,
+    hashtags: List[str] | None = None,
+    creators: List[str] | None = None,
 ) -> Dict[str, Any]:
     """Full TikTok search: find videos, then fetch captions for top results.
 
+    Uses expand_tiktok_queries() to generate multiple search queries,
+    runs ScrapeCreators for each, and merges/deduplicates results by video ID.
+
     Args:
-        topic: Search topic
+        topic: Search topic (raw topic, not planner's narrowed query)
         from_date: Start date (YYYY-MM-DD)
         to_date: End date (YYYY-MM-DD)
         depth: 'quick', 'default', or 'deep'
-        token: Apify API token
+        token: ScrapeCreators API key
+        hashtags: Optional list of TikTok hashtags to search (without #)
+        creators: Optional list of TikTok creator handles to fetch videos from
 
     Returns:
         Dict with 'items' list. Each item has a 'caption_snippet' field.
     """
-    # Step 1: Search
-    search_result = search_tiktok(topic, from_date, to_date, depth, token)
-    items = search_result.get("items", [])
+    core_topic = _extract_core_subject(topic)
+    seen_ids: Set[str] = set()
+    items: List[Dict[str, Any]] = []
+    last_error = None
+
+    # Step 0a: Hashtag search (high-signal, runs first)
+    if hashtags and token:
+        for hashtag in hashtags:
+            raw_items = _hashtag_search(hashtag, token)
+            parsed = _parse_items(raw_items, core_topic)
+            for item in parsed:
+                vid = item.get("video_id", "")
+                if vid and vid not in seen_ids:
+                    seen_ids.add(vid)
+                    items.append(item)
+
+    # Step 0b: Creator profile videos (high-signal)
+    if creators and token:
+        for creator in creators:
+            raw_items = _profile_videos(creator, token)
+            parsed = _parse_items(raw_items, core_topic)
+            for item in parsed:
+                vid = item.get("video_id", "")
+                if vid and vid not in seen_ids:
+                    seen_ids.add(vid)
+                    items.append(item)
+
+    # Step 1: Multi-query keyword search — run ScrapeCreators for each expanded query
+    queries = expand_tiktok_queries(topic, depth)
+    for q in queries:
+        search_result = search_tiktok(q, from_date, to_date, depth, token)
+        if search_result.get("error"):
+            last_error = search_result["error"]
+        for item in search_result.get("items", []):
+            vid = item.get("video_id", "")
+            if vid and vid not in seen_ids:
+                seen_ids.add(vid)
+                items.append(item)
+
+    # Sort merged results by views descending
+    items.sort(key=lambda x: x.get("engagement", {}).get("views", 0), reverse=True)
 
     if not items:
-        return search_result
+        return {"items": [], "error": last_error}
 
     # Step 2: Fetch captions for top N
     captions = fetch_captions(items, token, depth)
@@ -374,7 +537,7 @@ def search_and_enrich(
         if caption:
             item["caption_snippet"] = caption
 
-    return {"items": items, "error": search_result.get("error")}
+    return {"items": items, "error": last_error}
 
 
 def parse_tiktok_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:

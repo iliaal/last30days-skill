@@ -1,7 +1,8 @@
-"""Bird X search client - vendored Twitter GraphQL search for /last30days v2.1.
+"""Bird X search client for the v3.0.0 last30days pipeline.
 
 Uses a vendored subset of @steipete/bird v0.8.0 (MIT License) to search X
-via Twitter's GraphQL API. No external `bird` CLI binary needed - just Node.js 22+.
+via Twitter's GraphQL API. No external `bird` CLI binary needed - just Node.js.
+See scripts/lib/vendor/bird-search/package.json for authoritative version.
 """
 
 import json
@@ -11,8 +12,20 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from . import http, log
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+from .relevance import token_overlap_relevance as _compute_relevance
+
+
+def _first_of(*values):
+    """Return first value that is not None."""
+    for v in values:
+        if v is not None:
+            return v
+    return None
 
 # Path to the vendored bird-search wrapper
 _BIRD_SEARCH_MJS = Path(__file__).parent / "vendor" / "bird-search" / "bird-search.mjs"
@@ -36,17 +49,28 @@ def set_credentials(auth_token: Optional[str], ct0: Optional[str]):
         _credentials['CT0'] = ct0
 
 
+def _has_injected_credentials() -> bool:
+    """Return True when both X session cookies were injected from config."""
+    return bool(_credentials.get('AUTH_TOKEN') and _credentials.get('CT0'))
+
+
+def _has_process_credentials() -> bool:
+    """Return True when AUTH_TOKEN/CT0 are present in process env."""
+    return bool(os.environ.get("AUTH_TOKEN") and os.environ.get("CT0"))
+
+
 def _subprocess_env() -> Dict[str, str]:
     """Build env dict for Node subprocesses, merging injected credentials."""
     env = os.environ.copy()
     env.update(_credentials)
+    # Hard-disable browser-cookie fallback so normal pipeline runs never hit
+    # Safari/Chrome Keychain prompts during source detection or search.
+    env["BIRD_DISABLE_BROWSER_COOKIES"] = "1"
     return env
 
 
 def _log(msg: str):
-    """Log to stderr."""
-    sys.stderr.write(f"[Bird] {msg}\n")
-    sys.stderr.flush()
+    log.source_log("Bird", msg, tty_only=False)
 
 
 def _extract_core_subject(topic: str) -> str:
@@ -54,63 +78,17 @@ def _extract_core_subject(topic: str) -> str:
 
     X search is literal keyword AND matching — all words must appear.
     Aggressively strip question/meta/research words to keep only the
-    core product/concept name (2-3 words max).
+    core product/concept name (max 5 words).
     """
-    text = topic.lower().strip()
-
-    # Phase 1: Strip multi-word prefixes (longest first)
-    prefixes = [
-        'what are the best', 'what is the best', 'what are the latest',
-        'what are people saying about', 'what do people think about',
-        'how do i use', 'how to use', 'how to',
-        'what are', 'what is', 'tips for', 'best practices for',
-    ]
-    for p in prefixes:
-        if text.startswith(p + ' '):
-            text = text[len(p):].strip()
-            break
-
-    # Phase 2: Strip multi-word suffixes
-    suffixes = [
-        'best practices', 'use cases', 'prompt techniques',
-        'prompting techniques', 'prompting tips',
-    ]
-    for s in suffixes:
-        if text.endswith(' ' + s):
-            text = text[:-len(s)].strip()
-            break
-
-    # Phase 3: Filter individual noise words
-    _noise = {
-        # Question/filler words
-        'a', 'an', 'the', 'is', 'are', 'was', 'were', 'and', 'or',
-        'of', 'in', 'on', 'for', 'with', 'about', 'to',
-        'people', 'saying', 'think', 'said', 'lately',
-        # Research/meta descriptors
-        'best', 'top', 'good', 'great', 'awesome', 'killer',
-        'latest', 'new', 'news', 'update', 'updates',
-        'trendiest', 'trending', 'hottest', 'hot', 'popular', 'viral',
-        'practices', 'features', 'guide', 'tutorial',
-        'recommendations', 'advice', 'review', 'reviews',
-        'usecases', 'examples', 'comparison', 'versus', 'vs',
-        'plugin', 'plugins', 'skill', 'skills', 'tool', 'tools',
-        # Prompting meta words
-        'prompt', 'prompts', 'prompting', 'techniques', 'tips',
-        'tricks', 'methods', 'strategies', 'approaches',
-        # Action words
-        'using', 'uses', 'use',
-    }
-    words = text.split()
-    result = [w for w in words if w not in _noise]
-
-    return ' '.join(result[:3]) or topic.lower().strip()  # Max 3 words
+    from .query import extract_core_subject
+    return extract_core_subject(topic, max_words=5, strip_suffixes=True)
 
 
 def is_bird_installed() -> bool:
     """Check if vendored Bird search module is available.
 
     Returns:
-        True if bird-search.mjs exists and Node.js 22+ is in PATH.
+        True if bird-search.mjs exists and Node.js is in PATH.
     """
     if not _BIRD_SEARCH_MJS.exists():
         return False
@@ -118,7 +96,7 @@ def is_bird_installed() -> bool:
 
 
 def is_bird_authenticated() -> Optional[str]:
-    """Check if X credentials are available (env vars or browser cookies).
+    """Check if explicit X credentials are available.
 
     Returns:
         Auth source string if authenticated, None otherwise.
@@ -126,19 +104,11 @@ def is_bird_authenticated() -> Optional[str]:
     if not is_bird_installed():
         return None
 
-    try:
-        result = subprocess.run(
-            ["node", str(_BIRD_SEARCH_MJS), "--whoami"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=_subprocess_env(),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().split('\n')[0]
-        return None
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-        return None
+    if _has_injected_credentials():
+        return "env AUTH_TOKEN"
+    if _has_process_credentials():
+        return "env AUTH_TOKEN"
+    return None
 
 
 def check_npm_available() -> bool:
@@ -151,13 +121,13 @@ def check_npm_available() -> bool:
 
 
 def install_bird() -> Tuple[bool, str]:
-    """No-op - Bird search is vendored in v2.1, no installation needed.
+    """No-op. Bird search is vendored in v3.0.0, no installation needed.
 
     Returns:
         Tuple of (success, message).
     """
     if is_bird_installed():
-        return True, "Bird search is bundled with /last30days v2.1 - no installation needed."
+        return True, "Bird search is bundled with /last30days v3.0.0 - no installation needed."
     if not shutil.which("node"):
         return False, "Node.js 22+ is required for X search. Install Node.js first."
     return False, f"Vendored bird-search.mjs not found at {_BIRD_SEARCH_MJS}"
@@ -176,7 +146,7 @@ def get_bird_status() -> Dict[str, Any]:
         "installed": installed,
         "authenticated": auth_source is not None,
         "username": auth_source,  # Now returns auth source (e.g., "Safari", "env AUTH_TOKEN")
-        "can_install": True,  # Always vendored in v2.1
+        "can_install": True,  # Always vendored in v3.0.0
     }
 
 
@@ -232,7 +202,7 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
             try:
                 from last30days import unregister_child_pid
                 unregister_child_pid(proc.pid)
-            except (ImportError, Exception):
+            except Exception:
                 pass
 
         if proc.returncode != 0:
@@ -243,7 +213,10 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
         if not output:
             return {"items": []}
 
-        return json.loads(output)
+        parsed = json.loads(output)
+        if isinstance(parsed, list):
+            return {"items": parsed}
+        return parsed
 
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON response: {e}", "items": []}
@@ -279,16 +252,28 @@ def search_x(
     response = _run_bird_search(query, count, timeout)
 
     # Check if we got results
-    items = parse_bird_response(response)
+    items = parse_bird_response(response, query=core_topic)
 
-    # Retry with fewer keywords if 0 results and query has 3+ words
+    # Retry with OR groups for multi-word queries (X supports OR operator)
     core_words = core_topic.split()
+    if not items and len(core_words) >= 2:
+        from .query import extract_compound_terms
+        compounds = extract_compound_terms(topic)
+        if compounds:
+            # Build OR-group query: ("multi-agent" OR "agent simulation") since:DATE
+            or_parts = ' OR '.join(f'"{t}"' for t in compounds[:3])
+            _log(f"0 results for '{core_topic}', retrying with OR groups: {or_parts}")
+            query = f"({or_parts}) since:{from_date}"
+            response = _run_bird_search(query, count, timeout)
+            items = parse_bird_response(response, query=core_topic)
+
+    # Retry with fewer keywords if still 0 results and query has 3+ words
     if not items and len(core_words) > 2:
         shorter = ' '.join(core_words[:2])
         _log(f"0 results for '{core_topic}', retrying with '{shorter}'")
         query = f"{shorter} since:{from_date}"
         response = _run_bird_search(query, count, timeout)
-        items = parse_bird_response(response)
+        items = parse_bird_response(response, query=core_topic)
 
     # Last-chance retry: use strongest remaining token (often the product name)
     if not items and core_words:
@@ -353,6 +338,7 @@ def search_handles(
                 stderr=subprocess.PIPE,
                 text=True,
                 preexec_fn=preexec,
+                env=_subprocess_env(),
             )
 
             try:
@@ -375,22 +361,23 @@ def search_handles(
                 continue
 
             response = json.loads(output)
-            items = parse_bird_response(response)
+            items = parse_bird_response(response, query=core_topic)
             all_items.extend(items)
 
         except json.JSONDecodeError:
             _log(f"Invalid JSON from handle search for @{handle}")
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             _log(f"Handle search error for @{handle}: {e}")
 
     return all_items
 
 
-def parse_bird_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+def parse_bird_response(response: Dict[str, Any], query: str = "") -> List[Dict[str, Any]]:
     """Parse Bird response to match xai_x output format.
 
     Args:
         response: Raw Bird JSON response
+        query: Original search query for relevance scoring
 
     Returns:
         List of normalized item dicts matching xai_x.parse_x_response() format.
@@ -446,10 +433,10 @@ def parse_bird_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         # Build engagement dict (Bird uses camelCase: likeCount, retweetCount, etc.)
         engagement = {
-            "likes": tweet.get("likeCount") or tweet.get("like_count") or tweet.get("favorite_count"),
-            "reposts": tweet.get("retweetCount") or tweet.get("retweet_count"),
-            "replies": tweet.get("replyCount") or tweet.get("reply_count"),
-            "quotes": tweet.get("quoteCount") or tweet.get("quote_count"),
+            "likes": _first_of(tweet.get("likeCount"), tweet.get("like_count"), tweet.get("favorite_count")),
+            "reposts": _first_of(tweet.get("retweetCount"), tweet.get("retweet_count")),
+            "replies": _first_of(tweet.get("replyCount"), tweet.get("reply_count")),
+            "quotes": _first_of(tweet.get("quoteCount"), tweet.get("quote_count")),
         }
         # Convert to int where possible
         for key in engagement:
@@ -466,9 +453,9 @@ def parse_bird_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
             "url": url,
             "author_handle": author_handle.lstrip("@"),
             "date": date,
-            "engagement": engagement if any(v is not None for v in engagement.values()) else None,
+            "engagement": engagement,
             "why_relevant": "",  # Bird doesn't provide relevance explanations
-            "relevance": 0.7,  # Default relevance, let score.py re-rank
+            "relevance": _compute_relevance(query, str(tweet.get("text", ""))) if query else 0.7,
         }
 
         items.append(item)

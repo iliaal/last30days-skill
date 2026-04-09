@@ -1,4 +1,9 @@
-"""Reddit thread enrichment with real engagement metrics."""
+"""Reddit thread enrichment with real engagement metrics.
+
+Supports two backends:
+1. ScrapeCreators API (preferred) - no rate limits, 1 credit/call
+2. reddit.com/.json (fallback) - free but 429-prone
+"""
 
 import re
 from typing import Any, Dict, List, Optional
@@ -16,13 +21,10 @@ def extract_reddit_path(url: str) -> Optional[str]:
     Returns:
         Path component or None
     """
-    try:
-        parsed = urlparse(url)
-        if "reddit.com" not in parsed.netloc:
-            return None
-        return parsed.path
-    except:
+    parsed = urlparse(url)
+    if "reddit.com" not in parsed.netloc:
         return None
+    return parsed.path
 
 
 class RedditRateLimitError(Exception):
@@ -251,6 +253,70 @@ def enrich_reddit_item(
         })
 
     # Extract insights
+    item["comment_insights"] = extract_comment_insights(top_comments)
+
+    return item
+
+
+def enrich_reddit_item_sc(
+    item: Dict[str, Any],
+    token: str,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    """Enrich a Reddit item using ScrapeCreators comment API.
+
+    No rate limit risk. Uses 1 credit per call.
+
+    Args:
+        item: Reddit item dict (already has engagement from search)
+        token: ScrapeCreators API key
+        timeout: HTTP timeout
+
+    Returns:
+        Enriched item with top_comments and comment_insights
+    """
+    from . import reddit as reddit_mod
+
+    url = item.get("url", "")
+    if not url:
+        return item
+
+    raw_comments = reddit_mod.fetch_post_comments(url, token)
+    if not raw_comments:
+        return item
+
+    top_comments = []
+    for c in raw_comments[:10]:
+        body = c.get("body", "")
+        if not body or body in ("[deleted]", "[removed]"):
+            continue
+
+        score = c.get("ups") or c.get("score", 0)
+        author = c.get("author", "[deleted]")
+        permalink = c.get("permalink", "")
+        comment_url = f"https://reddit.com{permalink}" if permalink else ""
+
+        top_comments.append({
+            "score": score,
+            "date": dates.timestamp_to_date(c.get("created_utc")) if c.get("created_utc") else None,
+            "author": author,
+            "body": body[:300],
+            "excerpt": body[:200],
+            "url": comment_url,
+        })
+
+    top_comments.sort(key=lambda c: c.get("score", 0), reverse=True)
+
+    item["top_comments"] = []
+    for c in top_comments:
+        item["top_comments"].append({
+            "score": c.get("score", 0),
+            "date": c.get("date"),
+            "author": c.get("author", ""),
+            "excerpt": c.get("excerpt", ""),
+            "url": c.get("url", ""),
+        })
+
     item["comment_insights"] = extract_comment_insights(top_comments)
 
     return item
