@@ -134,8 +134,15 @@ Say "eli5 on" after any research run. The synthesis rewrites in plain language. 
 ## Install
 
 ### Claude Code
+
+#### Install
 ```
 /plugin marketplace add mvanhorn/last30days-skill
+```
+
+#### Update
+```
+claude plugin update last30days@last30days-skill
 ```
 
 ### OpenClaw
