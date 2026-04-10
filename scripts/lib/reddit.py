@@ -76,14 +76,6 @@ def _log(msg: str):
     log.source_log("Reddit", msg, tty_only=False)
 
 
-def _sc_headers(token: str) -> Dict[str, str]:
-    """Build ScrapeCreators request headers."""
-    return {
-        "x-api-key": token,
-        "Content-Type": "application/json",
-    }
-
-
 def _extract_core_subject(topic: str) -> str:
     """Extract core subject from verbose query.
 
@@ -357,7 +349,7 @@ def _global_search(
             from urllib.parse import urlencode
             params = urlencode({"query": query, "sort": sort, "timeframe": timeframe})
             url = f"{SCRAPECREATORS_BASE}/search?{params}"
-            headers = _sc_headers(token)
+            headers = http.scrapecreators_headers(token)
             headers["User-Agent"] = http.USER_AGENT
             data = http.get(url, headers=headers, timeout=30, retries=2)
             return data.get("posts", data.get("data", []))
@@ -374,7 +366,7 @@ def _global_search(
         resp = _requests.get(
             f"{SCRAPECREATORS_BASE}/search",
             params={"query": query, "sort": sort, "timeframe": timeframe},
-            headers=_sc_headers(token),
+            headers=http.scrapecreators_headers(token),
             timeout=30,
         )
         resp.raise_for_status()
@@ -417,7 +409,7 @@ def _subreddit_search(
                 "sort": sort, "timeframe": timeframe,
             })
             url = f"{SCRAPECREATORS_BASE}/subreddit/search?{params}"
-            headers = _sc_headers(token)
+            headers = http.scrapecreators_headers(token)
             headers["User-Agent"] = http.USER_AGENT
             data = http.get(url, headers=headers, timeout=30, retries=2)
             return data.get("posts", data.get("data", []))
@@ -434,7 +426,7 @@ def _subreddit_search(
                 "sort": sort,
                 "timeframe": timeframe,
             },
-            headers=_sc_headers(token),
+            headers=http.scrapecreators_headers(token),
             timeout=30,
         )
         resp.raise_for_status()
@@ -463,7 +455,7 @@ def fetch_post_comments(
             from urllib.parse import urlencode
             params = urlencode({"url": url})
             api_url = f"{SCRAPECREATORS_BASE}/post/comments?{params}"
-            headers = _sc_headers(token)
+            headers = http.scrapecreators_headers(token)
             headers["User-Agent"] = http.USER_AGENT
             data = http.get(api_url, headers=headers, timeout=30, retries=2)
             return data.get("comments", data.get("data", []))
@@ -475,7 +467,7 @@ def fetch_post_comments(
         resp = _requests.get(
             f"{SCRAPECREATORS_BASE}/post/comments",
             params={"url": url},
-            headers=_sc_headers(token),
+            headers=http.scrapecreators_headers(token),
             timeout=30,
         )
         resp.raise_for_status()
