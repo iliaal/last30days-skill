@@ -103,7 +103,7 @@ def save_output(report: schema.Report, emit: str, save_dir: str, suffix: str = "
         content = emit_output(report, emit)
     else:
         content = render.render_full(report)
-    out_path.write_text(content)
+    out_path.write_text(content, encoding="utf-8")
     return out_path
 
 
