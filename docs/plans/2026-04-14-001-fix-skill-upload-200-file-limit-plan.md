@@ -1,7 +1,7 @@
 ---
 title: Fix skill upload 200-file limit + packaging hygiene (public repo)
 type: fix
-status: active
+status: completed
 date: 2026-04-14
 deepened: 2026-04-14
 ---
