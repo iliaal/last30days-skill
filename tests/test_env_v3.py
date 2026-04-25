@@ -30,8 +30,11 @@ class EnvV3Tests(unittest.TestCase):
         self.assertEqual("b", bird_x._credentials["CT0"])
 
     def test_bird_auth_never_checks_browser_cookies(self):
+        # The guarantee: is_bird_authenticated() must not spawn any child
+        # process to probe for cookies. All subprocess paths in bird_x go
+        # through subproc.run_with_timeout, so patching that covers it.
         with mock.patch("lib.bird_x.is_bird_installed", return_value=True), mock.patch(
-            "lib.bird_x.subprocess.run",
+            "lib.bird_x.subproc.run_with_timeout",
             side_effect=AssertionError("browser-cookie whoami should not run"),
         ):
             bird_x._credentials.clear()
