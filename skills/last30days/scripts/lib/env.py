@@ -6,6 +6,7 @@ import datetime
 import json
 import locale
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,6 +180,31 @@ def _check_file_permissions(path: Path) -> None:
         sys.stderr.flush()
 
 
+def _strip_inline_comment(value: str) -> str:
+    """Drop a trailing ``# comment`` from the right-hand side of a KEY=value line.
+
+    Unquoted: ``#`` opens a comment only as the first non-blank character or
+    when preceded by whitespace, so ``value#nothash`` stays intact. Quoted:
+    everything up to the matching close quote is kept verbatim; only a
+    whitespace-separated ``#`` after the close quote is dropped. Anything that
+    does not match those shapes is returned unchanged for the existing quote
+    handling to deal with.
+    """
+    stripped = value.lstrip()
+    if stripped[:1] in ('"', "'"):
+        end = stripped.find(stripped[0], 1)
+        if end == -1:
+            return value
+        rest = stripped[end + 1:]
+        if rest[:1].isspace() and rest.lstrip().startswith('#'):
+            return stripped[:end + 1]
+        return value
+    match = re.search(r'(?:^|\s)#', stripped)
+    if match:
+        return stripped[:match.start()]
+    return value
+
+
 def load_env_file(path: Path) -> dict[str, str]:
     """Load environment variables from a file."""
     env = {}
@@ -203,7 +229,7 @@ def load_env_file(path: Path) -> dict[str, str]:
         if '=' in line:
             key, _, value = line.partition('=')
             key = key.strip()
-            value = value.strip()
+            value = _strip_inline_comment(value).strip()
             # Remove quotes if present
             if value and value[0] in ('"', "'") and value[-1] == value[0]:
                 value = value[1:-1]
