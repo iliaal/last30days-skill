@@ -314,12 +314,26 @@ def _intent_hint_block(plan: schema.QueryPlan) -> str:
     return ""
 
 
+_UNTRUSTED_FENCE_TOKEN = re.compile("untrusted_content", re.IGNORECASE)
+
+
+def _defang_untrusted_fence(value: str) -> str:
+    """Scraped content must not be able to terminate the fence that contains it.
+
+    A title carrying the literal closing tag would otherwise end the block
+    early, leaving the rest of the scraped text outside the fence and
+    indistinguishable from engine-authored prompt text. Matched
+    case-insensitively because the reader is a model, not an XML parser.
+    """
+    return _UNTRUSTED_FENCE_TOKEN.sub("untrusted-content", value)
+
+
 def _fenced_untrusted_content(candidate_block: str) -> str:
     return (
         f"{UNTRUSTED_CONTENT_NOTICE}\n\n"
         "Candidates:\n"
         "<untrusted_content>\n"
-        f"{candidate_block}\n"
+        f"{_defang_untrusted_fence(candidate_block)}\n"
         "</untrusted_content>"
     )
 
