@@ -19,6 +19,7 @@ Covers the plan's U2 scenarios:
      (env.x_backend_chain()[0]) across three config permutations.
 """
 
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -57,6 +58,7 @@ def _x_env(
     grok_installed=False,
     grok_authed=False,
     grok_expired=False,
+    grok_off_path=None,
 ):
     """Context managers configuring the X-chain probe environment.
 
@@ -67,6 +69,12 @@ def _x_env(
 
     ``grok_expired`` simulates an expired session: AUTH_EXPIRED status, but
     has_stored_auth/is_available still return True (refresh may work).
+
+    ``grok_off_path`` drives the off-PATH branch of the grok probe. It must be
+    patched rather than left to the real filesystem: ``_off_path_binary``
+    scans installer dirs like ~/.local/bin, so a developer who has grok
+    installed there would otherwise take that branch on every
+    ``grok_installed=False`` case and see failures CI never reproduces.
     """
     from datetime import datetime, timezone, timedelta
     stored = (
@@ -114,6 +122,12 @@ def _x_env(
             return_value=grok_installed and (grok_authed or grok_expired),
         ),
         mock.patch("lib.grok_x.is_available", return_value=grok_available),
+        mock.patch(
+            "lib.health._off_path_binary",
+            lambda name: (
+                Path(grok_off_path) if name == "grok" and grok_off_path else None
+            ),
+        ),
         mock.patch("lib.health.probe_dependency", _probe_dep({"node": node_status})),
         mock.patch("lib.xurl_x.stored_auth_status", return_value=stored),
         mock.patch(
@@ -398,6 +412,21 @@ class TestGrokExpiryStates:
         assert "not found on PATH" in grok.detail
         # Grok is opt-in, so even MISSING doesn't affect the resolution.
         # X is unconfigured (no auto-chain backends available).
+        assert res.active_backend is None
+
+    def test_grok_off_path_prescribes_a_path_edit_not_an_install(self):
+        """grok present in an installer dir but absent from PATH -> still
+        MISSING, but the prescription must be a PATH edit: installing again
+        would fix nothing. This branch had no coverage, so it only ever ran
+        on developer machines that happened to have grok in ~/.local/bin."""
+        res = _resolve_x({}, grok_installed=False,
+                         grok_off_path="/home/dev/.local/bin/grok")
+        grok = next(f for f in res.findings if f.name == "grok")
+        assert grok.status == health.MISSING
+        assert "not on this process's PATH" in grok.detail
+        assert "/home/dev/.local/bin/grok" in grok.detail
+        assert "/home/dev/.local/bin" in grok.prescription
+        assert "install" not in grok.prescription.lower()
         assert res.active_backend is None
 
     def test_grok_installed_never_logged_in_is_missing(self):
