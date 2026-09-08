@@ -314,7 +314,7 @@ def _intent_hint_block(plan: schema.QueryPlan) -> str:
     return ""
 
 
-_UNTRUSTED_FENCE_TOKEN = re.compile("untrusted_content", re.IGNORECASE)
+_UNTRUSTED_FENCE_TAG = re.compile(r"<\s*/?\s*untrusted_content\s*>", re.IGNORECASE)
 
 
 def _defang_untrusted_fence(value: str) -> str:
@@ -322,10 +322,17 @@ def _defang_untrusted_fence(value: str) -> str:
 
     A title carrying the literal closing tag would otherwise end the block
     early, leaving the rest of the scraped text outside the fence and
-    indistinguishable from engine-authored prompt text. Matched
-    case-insensitively because the reader is a model, not an XML parser.
+    indistinguishable from engine-authored prompt text.
+
+    Only the tag form is rewritten. A bare ``untrusted_content`` identifier in
+    scraped prose or code is left byte-exact: this is a research tool, and
+    altering evidence to defend the fence would corrupt what the judge scores.
+    Matched case-insensitively and tolerant of inner whitespace because the
+    reader is a model, not an XML parser.
     """
-    return _UNTRUSTED_FENCE_TOKEN.sub("untrusted-content", value)
+    return _UNTRUSTED_FENCE_TAG.sub(
+        lambda match: match.group(0).replace("_", "-"), value
+    )
 
 
 def _fenced_untrusted_content(candidate_block: str) -> str:
