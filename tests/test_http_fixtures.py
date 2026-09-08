@@ -96,6 +96,37 @@ def test_http_recording_scrubs_app_password_and_session_jwts(tmp_path, monkeypat
         assert fixture_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_recorded_fixture_is_private_from_creation_not_after_a_chmod(
+    tmp_path, monkeypatch
+):
+    """Tightening the mode after writing leaves the credentials in a
+    world-readable file for the length of the write. Assert the temp file is
+    opened 0600, since a final-mode check passes either way."""
+    monkeypatch.setattr(
+        http.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _response('{"ok": true}'),
+    )
+    opened: list[tuple[str, int]] = []
+    real_open = os.open
+
+    def _recording_open(path, flags, mode=0o777, **kwargs):
+        opened.append((str(path), mode))
+        return real_open(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(http.os, "open", _recording_open)
+
+    fixture_dir = tmp_path / "fixture"
+    with http.recording_requests(fixture_dir):
+        http.get("https://api.example.test/thing")
+
+    tmp_opens = [
+        (path, mode) for path, mode in opened if path.endswith(".http.json.tmp")
+    ]
+    assert tmp_opens, "the fixture temp file must be created via os.open with a mode"
+    assert all(mode == 0o600 for _path, mode in tmp_opens), tmp_opens
+
+
 def test_is_secret_key_covers_credential_names_without_over_matching():
     for name in (
         "password", "passwd", "app_password", "BSKY_APP_PASSWORD",

@@ -313,16 +313,26 @@ def recording_requests(path: str | Path):
                 "exchanges": state["exchanges"],
                 "source_exchanges": state["source_exchanges"],
             }
+            # A recorded exchange is credential-adjacent by construction:
+            # redaction is key-name driven, so an unrecognized key name leaves
+            # a real value on disk. Create the temp file 0600 at open time
+            # rather than chmod-ing after the write, or the credentials sit in
+            # a world-readable file for the length of the write (the parent
+            # directory is caller-supplied and not guaranteed private).
+            # Mirrors last30days.save_output. Unlink first so a stale or
+            # pre-planted temp file cannot be reused with its own wider mode --
+            # O_CREAT does not alter the mode of an existing file.
             temporary = target.with_name(f".{target.name}.tmp")
-            temporary.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
+            temporary.unlink(missing_ok=True)
+            fd = os.open(
+                temporary,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
             )
-            if os.name != "nt":
-                # A recorded exchange is credential-adjacent by construction:
-                # redaction is key-name driven, so an unrecognized key name
-                # leaves a real value on disk. Do not make it world-readable.
-                temporary.chmod(0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+                )
             temporary.replace(target)
 
 
