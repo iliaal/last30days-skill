@@ -288,6 +288,35 @@ class TestChangelogWorkflow(unittest.TestCase):
         self.assertIn("mcp/manifest.json", guarded)
         self.assertEqual(bump_set, guarded)
 
+    def test_prepare_release_workflow_stages_every_bumped_file(self) -> None:
+        """A file prepare_release.py rewrites but the workflow never stages is
+        silently dropped from the release commit, so the bump is lost and any
+        test waiting on the new value keeps skipping."""
+        mod = _load_prepare_release()
+        bump_set = {
+            str(path.relative_to(ROOT))
+            for path in (
+                mod.PYPROJECT,
+                mod.UV_LOCK,
+                mod.SKILL_MD,
+                *mod.JSON_VERSION_FILES,
+                *mod.MARKETPLACE_FILES,
+            )
+        }
+        text = (ROOT / ".github" / "workflows" / "prepare-release.yml").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r"\n\s*git add \\\n(.*?)\n\s*git status", text, re.DOTALL)
+        if not match:
+            raise AssertionError("git add ... block not found in prepare-release.yml")
+        staged = {
+            line.strip().rstrip("\\").strip()
+            for line in match.group(1).splitlines()
+            if line.strip()
+        }
+        self.assertIn("mcp/manifest.json", staged)
+        self.assertEqual(set(), bump_set - staged)
+
     def test_bump_all_updates_lockstep_surfaces(self) -> None:
         mod = _load_prepare_release()
         with tempfile.TemporaryDirectory() as tmp:
