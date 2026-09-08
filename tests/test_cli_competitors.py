@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import io
+import sys
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 import last30days as cli
+from lib import fanout
+
+
+def _fake_report(topic: str):
+    """Duck-typed Report stand-in; the guard runs before any field is read."""
+    return type("R", (), {"topic": topic, "warnings": []})()
 
 
 def _parse(*argv: str):
@@ -128,3 +136,37 @@ class CompetitorsCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompetitorMainTopicFailureTests(unittest.TestCase):
+    """The CLI layer above run_competitor_fanout.
+
+    The fan-out drops a failed sub-run from its list, and the render takes
+    element 0 as the comparison's subject. Nothing between them checked that
+    the main topic survived, so a main run that raised while >=2 peers
+    succeeded produced a complete-looking comparison headed by a peer, saved
+    under that peer's slug, with the user's topic absent.
+    """
+
+    def _run(self, surviving_labels):
+        surviving = [(label, _fake_report(label)) for label in surviving_labels]
+        argv = [
+            "last30days", "OpenAI",
+            "--competitors-list", "Anthropic,xAI",
+            "--mock", "--emit=json",
+        ]
+        err = io.StringIO()
+        # last30days imports fanout locally inside _main, so patch the
+        # source module rather than an attribute on the CLI module.
+        with mock.patch.object(
+            fanout, "run_competitor_fanout", return_value=surviving
+        ), mock.patch.object(sys, "argv", argv), redirect_stderr(err):
+            rc = cli.main()
+        return rc, err.getvalue()
+
+    def test_main_topic_failure_is_not_a_competitor_promotion(self):
+        rc, err = self._run(["Anthropic", "xAI"])
+        self.assertEqual(1, rc)
+        self.assertIn("main topic 'OpenAI' failed", err)
+        self.assertIn("Refusing to render a comparison", err)
+

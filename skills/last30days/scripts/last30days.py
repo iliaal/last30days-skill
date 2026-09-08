@@ -3785,6 +3785,25 @@ def _main(
                 competitors=discovered,
                 competitor_runner=_competitor_runner,
             )
+            # run_competitor_fanout drops a failed sub-run from the list, and
+            # the render takes entity_reports[0] as the comparison's subject.
+            # Without this check, a main topic that raised while >=2 peers
+            # succeeded silently promoted a competitor to be the subject: the
+            # report was headed by that peer, saved under its slug, and the
+            # topic the user actually asked about went unmentioned.
+            survived = {label for label, _ in entity_reports}
+            dropped = [
+                label for label in (topic, *discovered) if label not in survived
+            ]
+            if topic not in survived:
+                progress.end_processing()
+                sys.stderr.write(
+                    f"[Competitors] The main topic {topic!r} failed; "
+                    f"{len(entity_reports)} competitor sub-run(s) survived. "
+                    "Refusing to render a comparison headed by a competitor. "
+                    "Check the warnings above.\n"
+                )
+                return 1
             if len(entity_reports) < 2:
                 progress.end_processing()
                 sys.stderr.write(
@@ -3794,6 +3813,14 @@ def _main(
                 )
                 return 1
             report = entity_reports[0][1]
+            if dropped:
+                # A narrower comparison than the user asked for is a result
+                # they need to see, not a silent substitution.
+                report.warnings.append(
+                    "Comparison is incomplete: "
+                    f"{len(dropped)} of {len(discovered) + 1} entities failed and "
+                    f"were dropped ({', '.join(dropped)})."
+                )
         else:
             entity_reports = None
             report = _main_runner()
