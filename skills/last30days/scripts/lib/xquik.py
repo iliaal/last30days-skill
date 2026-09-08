@@ -194,12 +194,16 @@ def search_handles(
     *,
     count_per: int = 8,
     token: str = "",
+    failure_out: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """FROM lane: tweets authored BY each handle (their own timeline).
 
     The topic is NOT AND'd into the query (that was the from:-AND bug, #610) —
     we pull the raw timeline and use ``topic`` for relevance ranking only.
     Returns a flat list of item dicts (mirrors ``bird_x.search_handles``).
+
+    When ``failure_out`` is provided, the fatal auth/payment reason is appended
+    so the caller can distinguish it from a handle that posted nothing.
     """
     if not token or not handles:
         return []
@@ -217,7 +221,12 @@ def search_handles(
             index_offset=len(items),
         )
         if auth_error:
-            break  # fatal auth/payment failure — stop, keep what we have
+            # Fatal auth/payment failure — stop, keep what we have. Surface the
+            # reason: an empty FROM lane is otherwise indistinguishable from a
+            # subject who simply did not post.
+            if failure_out is not None:
+                failure_out.append(auth_error)
+            break
         items.extend(got)
     return items
 
@@ -230,11 +239,15 @@ def search_mentions(
     topic: str = "",
     count_per: int = 5,
     token: str = "",
+    failure_out: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """ABOUT lane: tweets mentioning each handle, authored by OTHERS.
 
     Queries ``@handle`` then drops the handle's own tweets (``_is_own``) so only
     third-party mentions remain. Returns a flat list of item dicts.
+
+    When ``failure_out`` is provided, the fatal auth/payment reason is appended
+    so the caller can distinguish it from a handle nobody mentioned.
     """
     if not token or not handles:
         return []
@@ -252,6 +265,8 @@ def search_mentions(
             index_offset=len(items),
         )
         if auth_error:
+            if failure_out is not None:
+                failure_out.append(auth_error)
             break
         items.extend(it for it in got if not _is_own(it.get("url", ""), handle))
     return items
