@@ -87,6 +87,23 @@ class TestPluginContract(unittest.TestCase):
         self.assertEqual(1, len(grok_plugins))
         self.assertEqual(version, grok_plugins[0]["version"])
 
+    def test_mcp_manifest_version_matches_lockstep(self) -> None:
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        version = pyproject["project"]["version"]
+        mcp_version = _json(ROOT / "mcp" / "manifest.json")["version"]
+
+        # mcp/manifest.json joined the lockstep set after it had already
+        # stalled at 3.6.0. Feature PRs may not bump it; only the next release
+        # PR (prepare_release.py) moves it off 3.6.0, at which point this
+        # branch is dead and the equality below is enforced unconditionally.
+        # Any other mismatch is fresh drift and fails.
+        if mcp_version == "3.6.0" and version != "3.6.0":
+            self.skipTest(
+                "mcp/manifest.json is at pre-lockstep 3.6.0; the next release PR "
+                "bumps it via prepare_release.py"
+            )
+        self.assertEqual(version, mcp_version)
+
     def test_claude_marketplace_has_current_schema_shape(self) -> None:
         marketplace = _json(ROOT / ".claude-plugin" / "marketplace.json")
 

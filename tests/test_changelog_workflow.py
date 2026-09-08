@@ -221,6 +221,13 @@ class TestChangelogWorkflow(unittest.TestCase):
             ),
             "3.18.1",
         )
+        self.assertEqual(
+            mod.version_from(
+                "mcp/manifest.json",
+                json.dumps({"manifest_version": "0.3", "version": "3.18.1"}),
+            ),
+            "3.18.1",
+        )
         with self.assertRaises(SystemExit):
             mod.version_from(".claude-plugin/plugin.json", "{not-json")
 
@@ -254,6 +261,33 @@ class TestChangelogWorkflow(unittest.TestCase):
                 mod.main(["--version", "3.18.1"])
             self.assertIn("Refusing to re-release", str(ctx.exception))
 
+    def test_prepare_release_bumps_mcp_manifest(self) -> None:
+        mod = _load_prepare_release()
+        self.assertIn(ROOT / "mcp" / "manifest.json", mod.JSON_VERSION_FILES)
+
+    def test_changelog_guard_version_paths_match_release_bump_set(self) -> None:
+        """Every path prepare_release.py bumps must be guarded, and vice versa."""
+        mod = _load_prepare_release()
+        bump_set = {
+            str(path.relative_to(ROOT))
+            for path in (
+                mod.PYPROJECT,
+                mod.UV_LOCK,
+                mod.SKILL_MD,
+                *mod.JSON_VERSION_FILES,
+                *mod.MARKETPLACE_FILES,
+            )
+        }
+        text = (ROOT / ".github" / "workflows" / "changelog-guard.yml").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r"VERSION_PATHS=\(\n(.*?)\n\s*\)", text, re.DOTALL)
+        if not match:
+            raise AssertionError("VERSION_PATHS=( ... ) not found in changelog-guard.yml")
+        guarded = {line.strip() for line in match.group(1).splitlines() if line.strip()}
+        self.assertIn("mcp/manifest.json", guarded)
+        self.assertEqual(bump_set, guarded)
+
     def test_bump_all_updates_lockstep_surfaces(self) -> None:
         mod = _load_prepare_release()
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,6 +297,7 @@ class TestChangelogWorkflow(unittest.TestCase):
             (tmp_path / ".claude-plugin").mkdir()
             (tmp_path / ".codex-plugin").mkdir()
             (tmp_path / ".grok-plugin").mkdir()
+            (tmp_path / "mcp").mkdir()
 
             (tmp_path / "pyproject.toml").write_text(
                 '[project]\nname = "last30days-skill"\nversion = "3.18.1"\n',
@@ -277,6 +312,7 @@ class TestChangelogWorkflow(unittest.TestCase):
                 ".codex-plugin/plugin.json",
                 ".grok-plugin/plugin.json",
                 "gemini-extension.json",
+                "mcp/manifest.json",
             ):
                 (tmp_path / rel).write_text(
                     json.dumps({"name": "last30days", "version": "3.18.1"}, indent=2)
@@ -314,6 +350,7 @@ class TestChangelogWorkflow(unittest.TestCase):
                 tmp_path / ".codex-plugin" / "plugin.json",
                 tmp_path / ".grok-plugin" / "plugin.json",
                 tmp_path / "gemini-extension.json",
+                tmp_path / "mcp" / "manifest.json",
             )
             mod.MARKETPLACE_FILES = (
                 tmp_path / ".claude-plugin" / "marketplace.json",
@@ -321,7 +358,7 @@ class TestChangelogWorkflow(unittest.TestCase):
             )
 
             touched = mod.bump_all("9.9.9")
-            self.assertEqual(len(touched), 9)
+            self.assertEqual(len(touched), 10)
 
             pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
             self.assertIn('version = "9.9.9"', pyproject)
@@ -337,6 +374,7 @@ class TestChangelogWorkflow(unittest.TestCase):
                 ".codex-plugin/plugin.json",
                 ".grok-plugin/plugin.json",
                 "gemini-extension.json",
+                "mcp/manifest.json",
             ):
                 data = json.loads((tmp_path / rel).read_text(encoding="utf-8"))
                 self.assertEqual(data["version"], "9.9.9", msg=rel)
