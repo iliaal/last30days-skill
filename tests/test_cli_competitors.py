@@ -170,3 +170,58 @@ class CompetitorMainTopicFailureTests(unittest.TestCase):
         self.assertIn("main topic 'OpenAI' failed", err)
         self.assertIn("Refusing to render a comparison", err)
 
+
+class CompetitorDuplicateLabelTests(unittest.TestCase):
+    """run_competitor_fanout keys its results by label, so a peer sharing the
+    main topic's label collapsed both submissions onto one report while the
+    returned list still had two entries: a self-comparison whose failed main
+    run the survivor check could not see."""
+
+    def _run(self, peers):
+        seen: dict[str, list[str]] = {}
+
+        def _capture(**kwargs):
+            seen["competitors"] = list(kwargs["competitors"])
+            # One survivor trips the <2 guard, so nothing renders from the
+            # duck-typed report. The assertion is on what fan-out received.
+            return [(kwargs["main_topic"], _fake_report(kwargs["main_topic"]))]
+
+        argv = [
+            "last30days", "OpenAI",
+            "--competitors-list", peers,
+            "--mock", "--emit=json",
+        ]
+        err = io.StringIO()
+        with mock.patch.object(
+            fanout, "run_competitor_fanout", side_effect=_capture
+        ), mock.patch.object(sys, "argv", argv), redirect_stderr(err):
+            rc = cli.main()
+        return rc, err.getvalue(), seen.get("competitors")
+
+    def test_peer_equal_to_main_topic_is_dropped(self):
+        _rc, err, competitors = self._run("OpenAI,Anthropic")
+        self.assertEqual(["Anthropic"], competitors)
+        self.assertIn("Dropping 'OpenAI'", err)
+
+    def test_duplicate_match_ignores_case_and_surrounding_space(self):
+        _rc, err, competitors = self._run("   OPENAI  ,Anthropic")
+        self.assertEqual(["Anthropic"], competitors)
+        self.assertIn("Dropping", err)
+
+    def test_differently_worded_peer_is_kept(self):
+        # Normalization collapses whitespace runs and folds case; it does not
+        # strip spaces. "Open AI" stays a distinct entity from "OpenAI",
+        # because merging those would silently drop a real peer.
+        _rc, _err, competitors = self._run("Open AI,Anthropic")
+        self.assertEqual(["Open AI", "Anthropic"], competitors)
+
+    def test_repeated_peer_is_dropped(self):
+        _rc, _err, competitors = self._run("Anthropic,anthropic,xAI")
+        self.assertEqual(["Anthropic", "xAI"], competitors)
+
+    def test_all_peers_duplicate_main_topic_aborts(self):
+        rc, err, competitors = self._run("openai, OpenAI ")
+        self.assertEqual(2, rc)
+        self.assertIsNone(competitors, "fan-out must not run with no peers")
+        self.assertIn("No peer distinct from 'OpenAI'", err)
+

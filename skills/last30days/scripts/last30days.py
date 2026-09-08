@@ -539,6 +539,17 @@ def comparison_topic(entity_reports: list[tuple[str, schema.Report]]) -> str:
     return " vs ".join(label for label, _ in entity_reports)
 
 
+def comparison_label_key(label: str) -> str:
+    """Normalize an entity label for duplicate detection.
+
+    Comparison labels double as keys in the fan-out's results dict, so two
+    entities differing only in case, surrounding space, or a repeated space
+    collide there while still looking distinct on the command line. Spaces
+    are collapsed, never stripped: "Open AI" stays distinct from "OpenAI".
+    """
+    return " ".join(label.split()).casefold()
+
+
 def compute_save_path_display(save_dir: str, topic: str, suffix: str, emit: str) -> str:
     """Compute the user-friendly save path string that will be shown in the footer.
 
@@ -3680,6 +3691,33 @@ def _main(
                         "comparison run. Pass --competitors-list to override.\n"
                     )
                     return 2
+
+            # run_competitor_fanout keys its results by label, so two
+            # submissions sharing one collapse to a single report while the
+            # returned list still carries two entries. That yields a
+            # comparison of an entity against itself, and it hides a failed
+            # main topic from the survivor check below: the duplicate peer's
+            # report answers for the label the main run was supposed to fill.
+            distinct_peers: list[str] = []
+            claimed_labels = {comparison_label_key(topic)}
+            for peer in discovered:
+                key = comparison_label_key(peer)
+                if key in claimed_labels:
+                    sys.stderr.write(
+                        f"[Competitors] Dropping {peer!r}: duplicates the main "
+                        "topic or an earlier peer.\n"
+                    )
+                    continue
+                claimed_labels.add(key)
+                distinct_peers.append(peer)
+            if not distinct_peers:
+                sys.stderr.write(
+                    f"[Competitors] No peer distinct from {topic!r} remains; "
+                    "there is nothing to compare against. Pass "
+                    "--competitors-list with distinct entities.\n"
+                )
+                return 2
+            discovered = distinct_peers
 
             sys.stderr.write(
                 f"[Competitors] Comparing: {topic} vs " + " vs ".join(discovered) + "\n"
