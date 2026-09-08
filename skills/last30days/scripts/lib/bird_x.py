@@ -124,6 +124,25 @@ def _log(msg: str):
     log.source_log("Bird", msg, tty_only=False)
 
 
+def _scrub_credentials(text: str) -> str:
+    """Redact X session cookie values from subprocess output.
+
+    A failure reason built from bird-search's stderr reaches the run's
+    ``source_status`` detail, which is rendered in the report and returned by
+    ``--emit=json``. The vendored client receives AUTH_TOKEN/CT0 in its
+    environment, so an error message that echoes a rejected cookie would
+    otherwise carry it into user-facing output. Log lines get the same
+    treatment because stderr is captured in agent harnesses.
+    """
+    scrubbed = text
+    for name in ("AUTH_TOKEN", "CT0", "TWITTER_AUTH_TOKEN", "TWITTER_CT0"):
+        value = _credentials.get(name) or os.environ.get(name)
+        # Short values would match too much ordinary text to be worth it.
+        if value and len(value) >= 8:
+            scrubbed = scrubbed.replace(value, "<redacted>")
+    return scrubbed
+
+
 def classify_run_failure(detail: str) -> str:
     """Map Bird's subprocess-only failure shapes to run outcome states."""
     text = detail.lower()
@@ -570,10 +589,10 @@ def search_handles(
         output = result.stdout.strip()
         if result.returncode != 0:
             if not output:
-                _log(f"Handle search failed for @{handle}: {result.stderr.strip()}")
+                _log(f"Handle search failed for @{handle}: {_scrub_credentials(result.stderr.strip())}")
                 _note(
                     f"@{handle}: bird-search exited {result.returncode} "
-                    f"({result.stderr.strip()[:160] or 'no stderr'})"
+                    f"({_scrub_credentials(result.stderr.strip())[:160] or 'no stderr'})"
                 )
                 return []
             # Windows/Node 24: benign libuv assertion can cause non-zero exit
@@ -653,10 +672,10 @@ def search_mentions(
             _note(f"@{handle}: could not spawn bird-search ({e})")
             return []
         if result.returncode != 0:
-            _log(f"Mention search failed for @{handle}: {result.stderr.strip()}")
+            _log(f"Mention search failed for @{handle}: {_scrub_credentials(result.stderr.strip())}")
             _note(
                 f"@{handle}: bird-search exited {result.returncode} "
-                f"({result.stderr.strip()[:160] or 'no stderr'})"
+                f"({_scrub_credentials(result.stderr.strip())[:160] or 'no stderr'})"
             )
             return []
         output = result.stdout.strip()
