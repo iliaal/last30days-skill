@@ -1384,6 +1384,44 @@ class TestSupplementalSearches(unittest.TestCase):
         self.assertEqual(schema.AUTH_FAILED, outcome.state)
         self.assertTrue(outcome.attempted)
 
+    @patch("lib.env.get_xquik_token", return_value="k")
+    @patch("lib.env.x_backend_chain", return_value=["xquik"])
+    @patch("lib.xquik.http.get")
+    @patch("lib.entity_extract.extract_entities")
+    def test_xquik_handle_lane_rate_limit_reaches_source_status(
+        self, mock_extract, mock_get, *_patches
+    ):
+        """A 429 is not an auth failure, so it took the non-fatal path inside
+        _execute_search and reported nothing at all: the lane came back empty
+        with no outcome and the run called it genuine silence."""
+        mock_extract.return_value = {
+            "x_handles": ["analyst1"], "x_hashtags": [], "reddit_subreddits": [],
+        }
+        mock_get.side_effect = http.HTTPError(
+            "HTTP 429: Too Many Requests", status_code=429,
+        )
+        bundle = schema.RetrievalBundle()
+        bundle.items_by_source["x"] = [
+            _make_source_item("x", "X1", "https://x.com/analyst1/status/1",
+                              author="analyst1", body="AI safety analysis"),
+            _make_source_item("x", "X2", "https://x.com/analyst1/status/2",
+                              author="analyst1", body="AI safety research"),
+        ]
+
+        pipeline._run_supplemental_searches(
+            topic="AI safety", bundle=bundle, plan=_make_plan("AI safety"), config={},
+            depth="default", date_range=("2026-02-15", "2026-03-17"),
+            runtime=_make_runtime(None), mock=False,
+            rate_limited_sources=set(), rate_limit_lock=threading.Lock(),
+        )
+
+        outcome = bundle.source_status.get("x")
+        self.assertIsNotNone(outcome, "x outcome must exist, not a silent zero")
+        # PARTIAL rather than AUTH_FAILED: a 429 is transient, and Phase 1
+        # items survived, so record_failure keeps them and marks the source.
+        self.assertEqual(schema.PARTIAL, outcome.state)
+        self.assertIn("429", outcome.detail)
+
     @patch("lib.env.x_backend_chain", return_value=["bird"])
     @patch("lib.bird_x.search_mentions", return_value=[])
     @patch("lib.bird_x.subproc.run_with_timeout")
