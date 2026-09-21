@@ -429,7 +429,7 @@ class TestHandleLaneNonFatalFailures(unittest.TestCase):
                                          "2026-06-18", token="k", failure_out=failures)
         self.assertEqual([], items)
         self.assertEqual(1, m.call_count)
-        self.assertEqual(["Xquik key unpaid (402)"], failures)
+        self.assertEqual(["Xquik key unpaid: payment required (402)"], failures)
 
 
 class TestAboutLane(unittest.TestCase):

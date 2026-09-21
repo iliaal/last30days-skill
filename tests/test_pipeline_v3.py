@@ -1353,7 +1353,7 @@ class TestSupplementalSearches(unittest.TestCase):
 
     @patch("lib.env.get_xquik_token", return_value="k")
     @patch("lib.env.x_backend_chain", return_value=["xquik"])
-    @patch("lib.xquik._execute_search", return_value=([], "Xquik key unpaid (402)"))
+    @patch("lib.xquik._execute_search", return_value=([], "Xquik key unpaid: payment required (402)"))
     @patch("lib.entity_extract.extract_entities")
     def test_xquik_handle_lane_auth_failure_reaches_source_status(
         self, mock_extract, _mock_exec, *_patches
