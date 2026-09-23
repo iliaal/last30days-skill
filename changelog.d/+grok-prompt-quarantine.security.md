@@ -1,1 +1,1 @@
-Grok X lane now passes the search topic to the privileged CLI prompt out-of-band, so a hostile topic can no longer inject instructions into the bypass-permissions run.
+The Grok X lane no longer interpolates the search topic into the `grok -p` prompt. The topic reaches the child through its environment, so quotes and newlines in a topic can no longer break out of the prompt's query framing. The model still reads the topic as data, so a topic that contains instructions can still influence the run.
