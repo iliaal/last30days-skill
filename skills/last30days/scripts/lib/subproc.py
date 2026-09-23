@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -30,11 +31,18 @@ class SubprocTimeout(Exception):
 # lock in register_child_pid.
 _child_pids: set[int] = set()
 _child_pids_lock = threading.RLock()
+# Set once cleanup_children starts. Worker threads keep running while the
+# handler sleeps through the grace, so a source can spawn a child after the
+# snapshot; register_child_pid kills such late children itself.
+_shutting_down = False
 
 
 def register_child_pid(pid: int) -> None:
     with _child_pids_lock:
         _child_pids.add(pid)
+        late = _shutting_down
+    if late:
+        _kill_child_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 def unregister_child_pid(pid: int) -> None:
@@ -42,18 +50,64 @@ def unregister_child_pid(pid: int) -> None:
         _child_pids.discard(pid)
 
 
-def cleanup_children() -> None:
-    """SIGTERM the process group of every registered live child."""
+# Upper bound on how long cleanup_children waits for SIGTERMed groups before
+# SIGKILLing them. It runs inside the engine's SIGTERM handler, so it must
+# finish well inside the MCP server's termGracePeriod
+# (mcp/internal/engine/run.go), after which the engine group is SIGKILLed and
+# the handler never reaches the escalation. Pinned by tests/test_subproc.py.
+CLEANUP_TERM_GRACE_SECONDS = 0.8
+_CLEANUP_POLL_SECONDS = 0.05
+
+
+def _signal_group(pgid: int, sig: int) -> bool:
+    """Signal a child's process group; False once the group has no members."""
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    return True
+
+
+def _kill_child_group(pid: int, sig: int) -> None:
+    if hasattr(os, "setsid") and hasattr(os, "killpg"):
+        _signal_group(pid, sig)
+        return
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def cleanup_children(grace: float = CLEANUP_TERM_GRACE_SECONDS) -> None:
+    """Terminate the process group of every registered child.
+
+    SIGTERM every group, wait up to ``grace`` seconds for the groups to
+    empty, then SIGKILL the survivors. run_with_timeout starts each child
+    with os.setsid, so the child's pid is its pgid; signalling the pgid
+    directly still reaches grandchildren after the leader has been reaped,
+    and the kernel does not reuse a pid while a group of that id has
+    members. A group whose only member is an unreaped zombie still reads as
+    live, which at worst costs the full grace and a harmless SIGKILL.
+    Children registered after this call starts are SIGKILLed as they
+    register, since the caller is about to exit.
+    """
+    global _shutting_down
     with _child_pids_lock:
+        _shutting_down = True
         pids = list(_child_pids)
-    for pid in pids:
-        try:
-            if hasattr(os, "killpg") and hasattr(os, "getpgid"):
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
-            else:
-                os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            continue
+    if not pids:
+        return
+    if not (hasattr(os, "setsid") and hasattr(os, "killpg")):
+        for pid in pids:
+            _kill_child_group(pid, signal.SIGTERM)
+        return
+    live = [pgid for pgid in pids if _signal_group(pgid, signal.SIGTERM)]
+    deadline = time.monotonic() + grace
+    while live and time.monotonic() < deadline:
+        time.sleep(_CLEANUP_POLL_SECONDS)
+        live = [pgid for pgid in live if _signal_group(pgid, 0)]
+    for pgid in live:
+        _signal_group(pgid, signal.SIGKILL)
 
 
 @dataclass

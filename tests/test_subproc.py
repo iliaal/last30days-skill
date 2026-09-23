@@ -36,6 +36,9 @@ def get_shell_cmd(cmd_str: str) -> list[str]:
 
 
 class TestRunWithTimeout(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(setattr, subproc, "_shutting_down", False)
+
     def test_success_returns_stdout(self):
         result = subproc.run_with_timeout(
             get_shell_cmd("echo hello"),
@@ -179,6 +182,86 @@ class TestRunWithTimeout(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 10)
         self.assertIsNone(outcome["error"])
         self.assertEqual(subproc._child_pids, set())
+
+    @unittest.skipIf(IS_WINDOWS, "process groups are POSIX-only")
+    def test_cleanup_children_sigkills_term_ignoring_group(self):
+        """Engine SIGTERM cannot fall through to run_with_timeout's own SIGKILL
+        escalation, so cleanup_children must escalate a group whose leader and
+        grandchild both ignore SIGTERM."""
+        import tempfile
+        import threading
+        import time
+
+        outcome = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = real_os.path.join(tmp, "grandchild.pid")
+
+            def worker():
+                try:
+                    outcome["result"] = subproc.run_with_timeout(
+                        ["sh", "-c", f"trap '' TERM; sleep 30 & echo $! > {pidfile}; wait"],
+                        timeout=20,
+                    )
+                except Exception as exc:
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not (
+                real_os.path.exists(pidfile) and real_os.path.getsize(pidfile)
+            ):
+                time.sleep(0.01)
+            self.assertTrue(real_os.path.getsize(pidfile))
+
+            start = time.monotonic()
+            subproc.cleanup_children(grace=0.3)
+            elapsed = time.monotonic() - start
+            thread.join(5)
+
+        self.assertGreaterEqual(elapsed, 0.3)
+        self.assertLess(elapsed, 1.0)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", outcome)
+        self.assertEqual(outcome["result"].returncode, -9)
+        self.assertEqual(subproc._child_pids, set())
+
+    @unittest.skipIf(IS_WINDOWS, "process groups are POSIX-only")
+    def test_child_registered_after_cleanup_started_is_killed(self):
+        """Workers keep running while the handler waits out the grace; a child
+        spawned after the snapshot must not outlive the engine."""
+        import time
+
+        subproc._shutting_down = True
+        start = time.monotonic()
+        result = subproc.run_with_timeout(get_shell_cmd("sleep 10"), timeout=5)
+        self.assertEqual(result.returncode, -9)
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual(subproc._child_pids, set())
+
+    def test_cleanup_children_returns_immediately_when_registry_empty(self):
+        import time
+
+        self.assertEqual(subproc._child_pids, set())
+        start = time.monotonic()
+        subproc.cleanup_children()
+        self.assertLess(time.monotonic() - start, 0.05)
+
+    def test_cleanup_grace_fits_inside_mcp_term_grace(self):
+        """The engine's SIGTERM handler runs cleanup_children; the MCP server
+        SIGKILLs the engine termGracePeriod after its SIGTERM. Keep at least
+        half of that window as margin for the SIGKILL pass and handler exit."""
+        import pathlib
+        import re
+
+        run_go = pathlib.Path(__file__).resolve().parents[1] / "mcp" / "internal" / "engine" / "run.go"
+        match = re.search(
+            r"^const termGracePeriod = (\d+) \* time\.Second$",
+            run_go.read_text(encoding="utf-8"),
+            re.M,
+        )
+        self.assertIsNotNone(match, "termGracePeriod declaration not found in run.go")
+        self.assertLessEqual(subproc.CLEANUP_TERM_GRACE_SECONDS * 2, int(match.group(1)))
 
     def test_lib_never_imports_engine_entrypoint(self):
         """last30days.py runs as __main__; importing it by name from lib/
