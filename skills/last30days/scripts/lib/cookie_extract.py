@@ -23,18 +23,20 @@ logger = logging.getLogger(__name__)
 
 
 def has_complete_pair(result: Optional[Dict[str, str]], cookie_names) -> bool:
-    """Return True when ``result`` holds every requested cookie name.
+    """Return True when ``result`` holds every requested cookie with a value.
 
     Shared by the Firefox profile scan, ``env.extract_browser_credentials``,
     and the setup wizard so a partial pair (e.g. a lone ``ct0`` from a
-    logged-out session) never shadows a complete one. ``cookie_names`` is
-    the spec's cookie list (a spec dict with a ``"cookies"`` key also works).
+    logged-out session) never shadows a complete one. Empty values do not
+    count: ``{"auth_token": "", "ct0": ""}`` is incomplete. ``cookie_names``
+    is the spec's cookie list (a spec dict with a ``"cookies"`` key also
+    works).
     """
     if not result:
         return False
     if isinstance(cookie_names, dict):
         cookie_names = cookie_names.get("cookies", [])
-    return all(name in result for name in cookie_names)
+    return all(result.get(name) for name in cookie_names)
 
 
 def _lock_temp_cookie_copy(path: str) -> None:

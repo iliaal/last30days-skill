@@ -559,6 +559,10 @@ class TestHasCompletePair:
     def test_partial_pair_is_incomplete(self):
         assert has_complete_pair({"ct0": "x"}, ["auth_token", "ct0"]) is False
 
+    def test_empty_valued_pair_is_incomplete(self):
+        assert has_complete_pair({"auth_token": "", "ct0": ""}, ["auth_token", "ct0"]) is False
+        assert has_complete_pair({"auth_token": "a", "ct0": ""}, ["auth_token", "ct0"]) is False
+
     def test_complete_pair(self):
         assert has_complete_pair(
             {"auth_token": "a", "ct0": "c"}, ["auth_token", "ct0"]

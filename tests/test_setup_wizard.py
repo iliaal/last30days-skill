@@ -1092,3 +1092,24 @@ class TestDeviceIntervalClamp:
 
         assert result["status"] == "success"
         assert mock_poll.call_args[0][1] == expected
+
+    @pytest.mark.parametrize("raw,expected", [
+        (0, 5),
+        (-5, 1),
+        (3600, 30),
+    ])
+    @patch("lib.setup_wizard.urlopen")
+    @patch("lib.setup_wizard.time.sleep")
+    def test_poll_device_auth_clamps_own_interval(
+        self, mock_sleep, mock_urlopen, raw, expected
+    ):
+        """poll_device_auth validates its own interval even when a caller
+        passes 0/negative/huge straight through."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"access_token": "tok"}).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        assert setup_wizard.poll_device_auth("dc", raw, timeout=30) == "tok"
+        mock_sleep.assert_called_once_with(expected)

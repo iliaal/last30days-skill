@@ -1006,6 +1006,7 @@ def poll_device_auth(
     """
     import sys
 
+    interval = _clamp_device_interval(interval)
     started_at = time.time()
     deadline = started_at + timeout
     last_reminder = started_at
