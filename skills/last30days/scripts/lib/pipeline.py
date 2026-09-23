@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -136,6 +136,20 @@ THIN_RETRY_EXEMPT: frozenset[str] = frozenset({"trustpilot", "perplexity", "meta
 # most importantly on a zero-item run, which is exactly when naming the
 # resolved advertiser and its counts matters most.
 STREAM_ARTIFACT_LIFT_KEYS: tuple[str, ...] = ("meta_ads_page", "meta_ads_tally")
+
+# Shared wall-clock bounds for fan-out waits (CR-012/CR-016). Every
+# ThreadPoolExecutor join below uses future.result(timeout=...) so a hung lane
+# degrades to a TIMEOUT partial instead of stalling run() forever. Worst case
+# per stream is one timeout ceiling (+ one inline 5xx retry in the main
+# fan-out, itself bounded by the lane's own timeouts); no new config knobs.
+STREAM_FUTURE_TIMEOUT_SECONDS = 180.0
+DISCOVERY_FUTURE_TIMEOUT_SECONDS = 60.0
+THIN_RETRY_FUTURE_TIMEOUT_SECONDS = 120.0
+# One X source, ordered backends: grok (up to 240s/call) + xai (90-180s) would
+# stack sequentially inside one unbounded future under MCP's kill. The chain
+# owns a shared monotonic deadline (x_api's TIMEOUT 30/RETRIES 2/DEADLINE 90
+# pattern); backends past the deadline are skipped.
+X_CHAIN_DEADLINE_SECONDS = 90.0
 
 
 def _lift_stream_artifacts(bundle) -> None:
@@ -603,9 +617,14 @@ def _fetch_discovery_source(
         # Discovery uses domain directly as query (no planner search_query)
         query = plan.domain
         last_error = ""
+        chain_deadline = time.monotonic() + X_CHAIN_DEADLINE_SECONDS
         for backend in env.x_backend_chain(config):
+            if time.monotonic() >= chain_deadline:
+                last_error = f"{last_error}; X chain budget exhausted".strip("; ") if last_error else "X chain budget exhausted"
+                break
             items, error = _fetch_x_backend(
                 backend, query, from_date, to_date, depth, config,
+                deadline=chain_deadline,
             )
             if items:
                 # Earlier failed-over backends' errors are observability, not
@@ -690,11 +709,30 @@ def nominate_candidates(
             ): source
             for source in plan.sources
         }
-        for future in as_completed(futures):
+        # Bounded wait (reddit-lane futures_wait pattern): a hung feed degrades
+        # to a TIMEOUT partial instead of stalling nominate forever.
+        done, not_done = futures_wait(futures, timeout=DISCOVERY_FUTURE_TIMEOUT_SECONDS)
+        for future in not_done:
+            source = futures[future]
+            bundle.mark_attempted(source)
+            future.cancel()
+            bundle.record_failure(
+                source,
+                health.TIMEOUT,
+                f"{source} timed out after {DISCOVERY_FUTURE_TIMEOUT_SECONDS:g}s",
+                attempted=True,
+            )
+            bundle.errors_by_source[source] = "discovery stream timed out"
+        for future in done:
             source = futures[future]
             bundle.mark_attempted(source)
             try:
-                raw_items, partial_error = future.result()
+                raw_items, partial_error = future.result(timeout=0)
+            except Exception as exc:
+                state, attempted = _classify_source_failure(exc)
+                bundle.record_failure(source, state, str(exc), attempted=attempted)
+                continue
+            try:
                 normalized = normalize.normalize_source_items(
                     source,
                     raw_items,
@@ -1019,10 +1057,17 @@ def enrich_nominations(
     if not nominations:
         return []
 
+    # Cooperative cancel: workers abandoned after the batch budget must not
+    # keep burning credits. The event rides the per-worker config copy into
+    # run() -> _retrieve_stream_impl, which exits early when set.
+    cancel = threading.Event()
+
     def _run_one(nomination: Nomination) -> schema.Report:
+        worker_config = dict(config)
+        worker_config["_enrich_cancel"] = cancel
         return run(
             topic=nomination.name,
-            config=config,
+            config=worker_config,
             depth=depth,
             requested_sources=requested_sources,
             mock=mock,
@@ -1049,6 +1094,9 @@ def enrich_nominations(
 
     def _worker(nomination: Nomination) -> None:
         with slots:
+            if cancel.is_set():
+                results_queue.put((nomination, None, TimeoutError("enrichment budget exhausted")))
+                return
             try:
                 results_queue.put((nomination, _run_one(nomination), None))
             except Exception as exc:  # noqa: BLE001 - containment is the contract
@@ -1086,6 +1134,9 @@ def enrich_nominations(
             )
     # Budget expired (or all done): unfinished topics fall through below as
     # nomination-only; their daemon workers are abandoned and cannot block exit.
+    # Signal cooperative cancel so queued workers skip new sub-runs and
+    # in-flight streams exit early instead of spending credits past the budget.
+    cancel.set()
 
     results: list[EnrichedTopic] = []
     for nomination in nominations:
@@ -2544,10 +2595,22 @@ def run(
                     )
                 ] = (subquery, source)
 
-        for future in as_completed(futures):
+        # Bounded fan-out (reddit-lane futures_wait pattern): the whole Phase 1
+        # waits at most STREAM_FUTURE_TIMEOUT_SECONDS, so a hung lane degrades
+        # to a TIMEOUT partial instead of stalling run() forever. Worst case
+        # per stream is one ceiling (+ one inline 5xx retry, itself bounded by
+        # the lane's own timeouts).
+        done, not_done = futures_wait(futures, timeout=STREAM_FUTURE_TIMEOUT_SECONDS)
+        for future in not_done:
+            subquery, source = futures[future]
+            future.cancel()
+            detail = f"{source} timed out after {STREAM_FUTURE_TIMEOUT_SECONDS:g}s"
+            bundle.errors_by_source[source] = detail
+            bundle.record_failure(source, health.TIMEOUT, detail, attempted=True)
+        for future in done:
             subquery, source = futures[future]
             try:
-                raw_items, artifact = future.result()
+                raw_items, artifact = future.result(timeout=0)
             except Exception as exc:
                 # Share 429 signal so pending futures skip this source
                 if _is_rate_limit_error(exc):
@@ -4397,13 +4460,30 @@ def _retry_thin_sources(
 
     retryable = [s for s in thin_sources if s not in rate_limited_sources]
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=min(4, len(retryable) or 1)) as executor:
         futures = {executor.submit(_retry_one_source, s): s for s in retryable}
-        for future in as_completed(futures):
+        done, not_done = futures_wait(futures, timeout=THIN_RETRY_FUTURE_TIMEOUT_SECONDS)
+        for future in not_done:
+            source = futures[future]
+            future.cancel()
+            detail = f"{source} timed out after {THIN_RETRY_FUTURE_TIMEOUT_SECONDS:g}s"
+            print(f"[Pipeline] Retry timed out for {source}: {detail}", file=sys.stderr)
+            bundle.record_failure(source, health.TIMEOUT, f"Simplified-query retry failed: {detail}", attempted=True)
+        for future in done:
             source = futures[future]
             try:
-                source, normalized, outcome_note, (detail_note, detail_state) = future.result()
+                source, normalized, outcome_note, (detail_note, detail_state) = future.result(timeout=0)
+            except Exception as exc:
+                print(f"[Pipeline] Retry failed for {source}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                state, attempted = _classify_source_failure(exc)
+                bundle.record_failure(
+                    source,
+                    state,
+                    f"Simplified-query retry failed: {exc}",
+                    attempted=attempted,
+                )
+                continue
+            try:
                 if outcome_note:
                     bundle.record_failure(
                         source,
@@ -4430,12 +4510,14 @@ def _retry_thin_sources(
                 )
 
 
-def _fetch_x_backend(backend, query, from_date, to_date, depth, config, warnings=None):
+def _fetch_x_backend(backend, query, from_date, to_date, depth, config, warnings=None, deadline=None):
     """Fetch X items from a single backend. Returns (items, error_str).
 
     ``warnings``, when given, collects backend receipts that are not
     failures (xapi's "window truncated to 7 days" after the recent-search
     fallback) so the X branch can surface them as run artifacts.
+    ``deadline`` is the chain's shared ``time.monotonic()`` budget; backends
+    that accept one (grok/xai/xquik/xapi) clamp their waits to the time left.
 
     Backends are tried in priority order by the caller (env.x_backend_chain);
     a non-empty error_str signals a hard failure (auth/payment/etc.) so the
@@ -4453,23 +4535,23 @@ def _fetch_x_backend(backend, query, from_date, to_date, depth, config, warnings
         result = bird_x.search_x(query, from_date, to_date, depth=depth)
         items = bird_x.parse_bird_response(result, query=query)
     elif backend == "grok":
-        result = grok_x.search_x(query, from_date, to_date, depth=depth)
+        result = grok_x.search_x(query, from_date, to_date, depth=depth, deadline=deadline)
         items = result.get("items", []) if isinstance(result, dict) else []
         if isinstance(result, dict) and result.get("auth_revoked"):
             err = result.get("error") or "grok session expired or was revoked"
             return items, f"grok: {err}"
     elif backend == "xai":
         model = config.get("LAST30DAYS_X_MODEL") or config.get("XAI_MODEL_PIN") or providers.XAI_DEFAULT
-        result = xai_x.search_x(config["XAI_API_KEY"], model, query, from_date, to_date, depth=depth)
+        result = xai_x.search_x(config["XAI_API_KEY"], model, query, from_date, to_date, depth=depth, deadline_monotonic=deadline)
         items = xai_x.parse_x_response(result)
     elif backend == "xurl":
         result = xurl_x.search_x(query, depth=depth)
         items = xurl_x.parse_x_response(result, topic=query)
     elif backend == "xquik":
-        result = xquik.search_xquik(query, from_date, to_date, depth=depth, token=env.get_xquik_token(config))
+        result = xquik.search_xquik(query, from_date, to_date, depth=depth, token=env.get_xquik_token(config), deadline=deadline)
         items = xquik.parse_xquik_response(result)
     elif backend == "xapi":
-        result = x_api.search_x(config.get("X_BEARER_TOKEN") or "", query, from_date, to_date, depth=depth)
+        result = x_api.search_x(config.get("X_BEARER_TOKEN") or "", query, from_date, to_date, depth=depth, deadline=deadline)
         items = result.get("items", []) if isinstance(result, dict) else []
         warning = result.get("warning") if isinstance(result, dict) else None
         if warning:
@@ -4727,6 +4809,11 @@ def _retrieve_stream_impl(
     # Early exit if source was rate-limited by a sibling future
     if rate_limited_sources is not None and source in rate_limited_sources:
         return [], {}
+    # Cooperative enrichment cancel: the batch budget expired, so skip new
+    # network work instead of burning credits past the deadline.
+    _cancel = config.get("_enrich_cancel")
+    if _cancel is not None and getattr(_cancel, "is_set", lambda: False)():
+        return [], {}
     from_date, to_date = date_range
     if mock:
         return _mock_stream_results(source, subquery)
@@ -4900,9 +4987,17 @@ def _retrieve_stream_impl(
         items = []
         used_backend = None
         x_warnings: list[str] = []
+        chain_deadline = time.monotonic() + X_CHAIN_DEADLINE_SECONDS
         for i, backend in enumerate(chain):
+            if time.monotonic() >= chain_deadline:
+                msg = "X chain budget exhausted"
+                last_error = f"{last_error}; {msg}".strip("; ") if last_error else msg
+                chain_errors.append(msg)
+                print("[X] chain budget exhausted; skipping remaining backends", file=sys.stderr)
+                break
             items, err = _fetch_x_backend(
                 backend, x_query, from_date, to_date, depth, config, warnings=x_warnings,
+                deadline=chain_deadline,
             )
             if items:
                 if i > 0:
@@ -4992,30 +5087,34 @@ def _retrieve_stream_impl(
                 print(f"[X] corpus off-topic; retrying with '{retry_query}'", file=sys.stderr)
 
                 if used_backend:
-                    retry_items, retry_err = _fetch_x_backend(
-                        used_backend, retry_query, from_date, to_date, depth, config
-                    )
-                    if retry_items:
-                        # Judge retry corpus
-                        retry_for_judge = [
-                            {"author_handle": it.get("author_handle", ""), "text": it.get("text", "")}
-                            for it in retry_items
-                        ]
-                        retry_judgment = x_judge.judge_x_corpus(
-                            retry_for_judge, x_query, ranking_query=ranking_query
+                    if time.monotonic() >= chain_deadline:
+                        print("[X] chain budget exhausted; skipping judge retry", file=sys.stderr)
+                    else:
+                        retry_items, retry_err = _fetch_x_backend(
+                            used_backend, retry_query, from_date, to_date, depth, config,
+                            deadline=chain_deadline,
                         )
-                        orig_judgment = x_judge.judge_x_corpus(
-                            items_for_judge, x_query, ranking_query=ranking_query
-                        )
-                        # Use retry if better on-topic ratio
-                        if retry_judgment["on_topic_ratio"] > orig_judgment["on_topic_ratio"]:
-                            print(
-                                f"[X] retry improved on-topic ratio: "
-                                f"{orig_judgment['on_topic_ratio']:.0%} -> "
-                                f"{retry_judgment['on_topic_ratio']:.0%}",
-                                file=sys.stderr,
+                        if retry_items:
+                            # Judge retry corpus
+                            retry_for_judge = [
+                                {"author_handle": it.get("author_handle", ""), "text": it.get("text", "")}
+                                for it in retry_items
+                            ]
+                            retry_judgment = x_judge.judge_x_corpus(
+                                retry_for_judge, x_query, ranking_query=ranking_query
                             )
-                            items = retry_items
+                            orig_judgment = x_judge.judge_x_corpus(
+                                items_for_judge, x_query, ranking_query=ranking_query
+                            )
+                            # Use retry if better on-topic ratio
+                            if retry_judgment["on_topic_ratio"] > orig_judgment["on_topic_ratio"]:
+                                print(
+                                    f"[X] retry improved on-topic ratio: "
+                                    f"{orig_judgment['on_topic_ratio']:.0%} -> "
+                                    f"{retry_judgment['on_topic_ratio']:.0%}",
+                                    file=sys.stderr,
+                                )
+                                items = retry_items
 
             # Prune off-topic items before the pool. Eight on-topic → ok with 8.
             # Zero on-topic after retry → no-results, not ok with 40 junk.
