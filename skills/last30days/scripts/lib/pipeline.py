@@ -3532,32 +3532,33 @@ def _warnings(
     return warnings
 
 
-def _mentions_status(msg: str, codes: tuple[str, ...]) -> bool:
-    """True when ``msg`` mentions one of the HTTP status codes as a token.
+_STATUS_PREFIX = r"\b(?:https?(?:/\d(?:\.\d)?)?(?:\s+error)?|status(?:[\s_]*code)?|code)\s*[:=#]?\s*"
 
-    Word boundaries are digit-aware (``(?<!\\d)(?!\\d)``) so ``"14293"``
-    does not read as a 429 and ``"15003"`` does not read as a 500.
+
+def _mentions_status(msg: str, code_pattern: str, phrases: tuple[str, ...]) -> bool:
+    """True when ``msg`` names an HTTP status matching ``code_pattern``.
+
+    A bare number is not enough (``"batch 429 failed"`` is not a rate
+    limit): the code must follow an HTTP/status/code marker, or co-occur
+    with one of ``phrases`` (``"rate limited (429)"``). Digit-aware
+    boundaries keep ``"14293"`` from reading as a 429.
     """
-    if not msg or not codes:
+    if not msg:
         return False
-    pattern = r"(?<!\d)(?:" + "|".join(re.escape(c) for c in codes) + r")(?!\d)"
-    return re.search(pattern, msg) is not None
+    code = r"(?:" + code_pattern + r")(?!\d)"
+    if re.search(_STATUS_PREFIX + code, msg, re.IGNORECASE):
+        return True
+    lowered = msg.lower()
+    return any(p in lowered for p in phrases) and re.search(r"(?<!\d)" + code, msg) is not None
 
 
-_TRANSIENT_STATUS_CODES = (
-    "500",
-    "501",
-    "502",
-    "503",
-    "504",
-    "505",
-    "506",
-    "507",
-    "508",
-    "509",
-    "510",
-    "511",
-    "599",
+_RATE_LIMIT_PHRASES = ("rate limit", "rate-limit", "ratelimit", "too many requests")
+_SERVER_ERROR_PHRASES = (
+    "server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "gateway time-out",
 )
 
 
@@ -3565,7 +3566,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     """Detect 429 rate-limit errors by status code or message text."""
     if hasattr(exc, "status_code") and getattr(exc, "status_code", None) == 429:
         return True
-    return _mentions_status(str(exc), ("429",))
+    return _mentions_status(str(exc), "429", _RATE_LIMIT_PHRASES)
 
 
 class SourceRunError(RuntimeError):
@@ -3800,7 +3801,7 @@ def _is_transient_error(exc: Exception) -> bool:
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and 500 <= status < 600:
         return True
-    return _mentions_status(str(exc), _TRANSIENT_STATUS_CODES)
+    return _mentions_status(str(exc), r"5\d\d", _SERVER_ERROR_PHRASES)
 
 
 def _topic_handle_mentions(topic: str) -> set[str]:
