@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 import math
 import queue
 import re
@@ -137,11 +138,11 @@ THIN_RETRY_EXEMPT: frozenset[str] = frozenset({"trustpilot", "perplexity", "meta
 # resolved advertiser and its counts matters most.
 STREAM_ARTIFACT_LIFT_KEYS: tuple[str, ...] = ("meta_ads_page", "meta_ads_tally")
 
-# Shared wall-clock bounds for fan-out waits (CR-012/CR-016). Every
-# ThreadPoolExecutor join below uses future.result(timeout=...) so a hung lane
-# degrades to a TIMEOUT partial instead of stalling run() forever. Worst case
-# per stream is one timeout ceiling (+ one inline 5xx retry in the main
-# fan-out, itself bounded by the lane's own timeouts); no new config knobs.
+# Shared wall-clock bounds for fan-out waits (CR-012/CR-016). Each bounded
+# fan-out waits with futures_wait(timeout=...) inside _abandoning_executor, so
+# a hung lane degrades to a TIMEOUT partial instead of stalling run() forever.
+# Worst case per stream is one timeout ceiling (+ one inline 5xx retry in the
+# main fan-out, itself bounded by the lane's own timeouts); no new config knobs.
 STREAM_FUTURE_TIMEOUT_SECONDS = 180.0
 DISCOVERY_FUTURE_TIMEOUT_SECONDS = 60.0
 THIN_RETRY_FUTURE_TIMEOUT_SECONDS = 120.0
@@ -150,6 +151,25 @@ THIN_RETRY_FUTURE_TIMEOUT_SECONDS = 120.0
 # owns a shared monotonic deadline (x_api's TIMEOUT 30/RETRIES 2/DEADLINE 90
 # pattern); backends past the deadline are skipped.
 X_CHAIN_DEADLINE_SECONDS = 90.0
+
+
+@contextlib.contextmanager
+def _abandoning_executor(max_workers: int) -> Iterator[ThreadPoolExecutor]:
+    """ThreadPoolExecutor whose exit does not join running workers.
+
+    The stock context manager exits via shutdown(wait=True), which blocks on
+    the very straggler a futures_wait budget just declared timed out, so the
+    budget would bound only the wait, not the caller. Exiting with
+    shutdown(wait=False, cancel_futures=True) drops queued work and lets a
+    running straggler finish and discard its result in the background (the
+    amazon review-lane pattern). The interpreter still joins those threads at
+    exit, so each straggler stays bounded by its lane's own timeouts.
+    """
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        yield pool
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _lift_stream_artifacts(bundle) -> None:
@@ -704,7 +724,7 @@ def nominate_candidates(
     # Shared receipts sink: only X appends (xapi's truncated window); the
     # executor submit below passes it to every source, the rest ignore it.
     x_receipts: list[str] = []
-    with ThreadPoolExecutor(max_workers=max(1, len(plan.sources))) as executor:
+    with _abandoning_executor(max_workers=max(1, len(plan.sources))) as executor:
         futures = {
             executor.submit(
                 _fetch_discovery_source,
@@ -781,11 +801,14 @@ def nominate_candidates(
             except Exception as exc:
                 state, attempted = _classify_source_failure(exc)
                 bundle.record_failure(source, state, str(exc), attempted=attempted)
-    if x_receipts:
-        # Backend receipts that are not failures (xapi's truncated window):
-        # the same x_partial_coverage key the main path uses. Placed after
-        # the executor joins so a straggler's append cannot land past it.
-        bundle.artifacts.setdefault("x_partial_coverage", []).extend(x_receipts)
+    # Backend receipts that are not failures (xapi's truncated window): the
+    # same x_partial_coverage key the main path uses. X extends the sink just
+    # before returning, so a finished X future's receipts are complete. The
+    # executor exit does not join stragglers: a timed-out X can still append
+    # after the wait, and its receipts are dropped along with its items.
+    x_finished = any(futures[future] == "x" for future in done)
+    if x_finished and x_receipts:
+        bundle.artifacts.setdefault("x_partial_coverage", []).extend(list(x_receipts))
     return bundle
 
 
@@ -2552,7 +2575,7 @@ def run(
         if source in available and source != "corpus"
     )
     max_workers = _inner_max_workers(stream_count, internal_subrun=internal_subrun)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with _abandoning_executor(max_workers=max_workers) as executor:
         for subquery in plan.subqueries:
             for source in subquery.sources:
                 if source not in available:
@@ -4500,7 +4523,7 @@ def _retry_thin_sources(
 
     retryable = [s for s in thin_sources if s not in rate_limited_sources]
 
-    with ThreadPoolExecutor(max_workers=min(4, len(retryable) or 1)) as executor:
+    with _abandoning_executor(max_workers=min(4, len(retryable) or 1)) as executor:
         futures = {executor.submit(_retry_one_source, s): s for s in retryable}
         done, not_done = futures_wait(futures, timeout=THIN_RETRY_FUTURE_TIMEOUT_SECONDS)
         for future in not_done:

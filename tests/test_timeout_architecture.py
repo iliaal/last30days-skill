@@ -166,7 +166,7 @@ def test_bird_clamps_timeout_to_remaining_deadline(monkeypatch):
     seen = []
     monkeypatch.setattr(
         bird_x, "_run_bird_search",
-        lambda q, count, timeout: (seen.append(timeout), {"items": [], "error": ""})[1],
+        lambda q, count, timeout, deadline=None: (seen.append(timeout), {"items": [], "error": ""})[1],
     )
     monkeypatch.setattr(bird_x, "parse_bird_response", lambda *a, **k: [])
     bird_x.search_x("topic", "2026-08-01", "2026-08-31", depth="default",
@@ -322,3 +322,160 @@ def test_cancel_set_on_drain_failure(monkeypatch):
     with pytest.raises(RuntimeError, match="drain boom"):
         pipeline.enrich_nominations(nominations, config={}, budget_seconds=5)
     assert seen["cancel"] is not None and seen["cancel"].is_set()
+
+
+# Hung-lane regressions: the worker blocks far past the budget, so a caller
+# that still joins it on executor exit fails the elapsed bound.
+HANG_SECONDS = 5.0
+RETURN_BOUND_SECONDS = 1.5
+
+
+def test_nominate_does_not_join_hung_lane(monkeypatch):
+    monkeypatch.setattr(pipeline, "DISCOVERY_FUTURE_TIMEOUT_SECONDS", 0.05)
+    release = threading.Event()
+    def hung(*a, **k):
+        release.wait(HANG_SECONDS)
+        return [], None
+    monkeypatch.setattr(pipeline, "_fetch_discovery_source", hung)
+    plan = mock.Mock()
+    plan.sources = ["reddit"]
+    plan.domain = "topic"
+    start = time.monotonic()
+    try:
+        bundle = pipeline.nominate_candidates(
+            plan, from_date="2026-08-01", to_date="2026-08-31",
+            depth="quick", mock=False, config={}, lookback_days=30,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+    assert elapsed < RETURN_BOUND_SECONDS, f"nominate joined the hung lane ({elapsed:.2f}s)"
+    assert bundle.source_status["reddit"].state == health.TIMEOUT
+
+
+def test_nominate_drops_receipts_from_timed_out_x(monkeypatch):
+    monkeypatch.setattr(pipeline, "DISCOVERY_FUTURE_TIMEOUT_SECONDS", 0.05)
+    release = threading.Event()
+    def x_straggler(source, plan, **kwargs):
+        kwargs["warnings"].append("X: straggler receipt")
+        release.wait(HANG_SECONDS)
+        return [], None
+    monkeypatch.setattr(pipeline, "_fetch_discovery_source", x_straggler)
+    plan = mock.Mock()
+    plan.sources = ["x"]
+    plan.domain = "topic"
+    try:
+        bundle = pipeline.nominate_candidates(
+            plan, from_date="2026-08-01", to_date="2026-08-31",
+            depth="quick", mock=False, config={}, lookback_days=30,
+        )
+    finally:
+        release.set()
+    assert bundle.source_status["x"].state == health.TIMEOUT
+    assert "x_partial_coverage" not in bundle.artifacts
+
+
+def test_run_does_not_join_hung_stream(monkeypatch):
+    monkeypatch.setattr(pipeline, "STREAM_FUTURE_TIMEOUT_SECONDS", 0.2)
+    release = threading.Event()
+    def fake_retrieve(**kwargs):
+        if kwargs.get("source") == "reddit":
+            release.wait(HANG_SECONDS)
+        return [], {}
+    monkeypatch.setattr(pipeline, "_retrieve_stream", fake_retrieve)
+    start = time.monotonic()
+    try:
+        report = pipeline.run(
+            topic="timeout probe",
+            config={"LAST30DAYS_REASONING_PROVIDER": "gemini"},
+            depth="quick",
+            requested_sources=["reddit", "x"],
+            mock=True,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+    assert elapsed < RETURN_BOUND_SECONDS + 1.0, f"run() joined the hung stream ({elapsed:.2f}s)"
+    assert report.source_status["reddit"].state == health.TIMEOUT
+
+
+def test_thin_retry_does_not_join_hung_retry(monkeypatch):
+    monkeypatch.setattr(pipeline, "THIN_RETRY_FUTURE_TIMEOUT_SECONDS", 0.05)
+    release = threading.Event()
+    def hung(**kwargs):
+        release.wait(HANG_SECONDS)
+        return [], {}
+    monkeypatch.setattr(pipeline, "_retrieve_stream", hung)
+    bundle = schema.RetrievalBundle()
+    plan = mock.Mock()
+    plan.subqueries = [schema.SubQuery(
+        label="primary", search_query="Kanye West",
+        ranking_query="Kanye West", sources=["reddit"], weight=1.0,
+    )]
+    plan.freshness_mode = "breaking"
+    start = time.monotonic()
+    try:
+        pipeline._retry_thin_sources(
+            topic="Kanye West", bundle=bundle, plan=plan,
+            config={}, depth="default",
+            date_range=("2026-08-01", "2026-08-31"), runtime=mock.Mock(),
+            mock=False, rate_limited_sources=set(),
+            rate_limit_lock=threading.Lock(),
+            settings={"per_stream_limit": 6, "pool_limit": 15, "rerank_limit": 12},
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+    assert elapsed < RETURN_BOUND_SECONDS, f"thin retry joined the hung lane ({elapsed:.2f}s)"
+    assert bundle.source_status["reddit"].state == health.TIMEOUT
+
+
+def _interstitial():
+    from lib.subproc import SubprocResult
+    return SubprocResult(returncode=0, stdout="<!DOCTYPE html><html>blocked</html>", stderr="")
+
+
+def test_bird_decode_retry_skipped_when_delay_exceeds_budget(monkeypatch):
+    from lib import bird_x
+    timeouts, sleeps = [], []
+    monkeypatch.setattr(
+        bird_x, "_invoke_bird_subprocess",
+        lambda q, c, timeout: (timeouts.append(timeout), (_interstitial(), None))[1],
+    )
+    monkeypatch.setattr(bird_x.time, "sleep", lambda s: sleeps.append(s))
+    response = bird_x._run_bird_search(
+        "q", count=10, timeout=60,
+        deadline=time.monotonic() + bird_x.JSON_DECODE_RETRY_DELAY - 2,
+    )
+    assert timeouts == [60] and sleeps == [], "no retry may start without budget for it"
+    assert "budget exhausted" in response["error"]
+    assert bird_x.classify_run_failure(response["error"]) == health.SCHEMA_DRIFT
+
+
+def test_bird_decode_retry_reclamps_timeout_to_remaining_budget(monkeypatch):
+    from lib import bird_x
+    timeouts = []
+    monkeypatch.setattr(
+        bird_x, "_invoke_bird_subprocess",
+        lambda q, c, timeout: (timeouts.append(timeout), (_interstitial(), None))[1],
+    )
+    monkeypatch.setattr(bird_x.time, "sleep", lambda s: None)
+    bird_x._run_bird_search("q", count=10, timeout=60, deadline=time.monotonic() + 30)
+    assert len(timeouts) == 2
+    assert timeouts[0] == 60 and timeouts[1] <= 30, f"retry must fit the budget: {timeouts}"
+
+
+def test_bird_budget_stop_keeps_clean_empty_outcome(monkeypatch):
+    from lib import bird_x
+    deadline = time.monotonic() + 30
+    calls = []
+    def fake_run(query, count, timeout, deadline=None):
+        calls.append(query)
+        monkeypatch.setattr(bird_x.time, "monotonic", lambda: deadline + 1)
+        return {"items": []}
+    monkeypatch.setattr(bird_x, "_run_bird_search", fake_run)
+    response = bird_x.search_x(
+        "multi word agent topic", "2026-08-01", "2026-08-31", deadline=deadline,
+    )
+    assert len(calls) == 1, "zero-result retries must not start past the deadline"
+    assert response == {"items": []}, f"clean no-results must not become an error: {response}"
