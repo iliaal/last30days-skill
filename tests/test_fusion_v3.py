@@ -429,8 +429,24 @@ class TestUrlNormalization(unittest.TestCase):
     def test_case_insensitive(self):
         from lib.fusion import _normalize_url
         self.assertEqual(
-            _normalize_url("https://Reddit.com/r/Test"),
+            _normalize_url("https://Reddit.com/r/test"),
             _normalize_url("https://reddit.com/r/test"),
+        )
+
+    def test_path_case_preserved(self):
+        # CR-009: the path is case-sensitive; only the host lowercases.
+        from lib.fusion import _normalize_url
+        self.assertNotEqual(
+            _normalize_url("https://example.com/Page"),
+            _normalize_url("https://example.com/page"),
+        )
+
+    def test_query_case_preserved(self):
+        # CR-009: the query is case-sensitive; only the host lowercases.
+        from lib.fusion import _normalize_url
+        self.assertNotEqual(
+            _normalize_url("https://youtube.com/watch?v=ABC123"),
+            _normalize_url("https://youtube.com/watch?v=abc123"),
         )
 
 if __name__ == "__main__":

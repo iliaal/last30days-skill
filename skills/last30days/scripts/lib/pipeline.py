@@ -3532,11 +3532,40 @@ def _warnings(
     return warnings
 
 
+def _mentions_status(msg: str, codes: tuple[str, ...]) -> bool:
+    """True when ``msg`` mentions one of the HTTP status codes as a token.
+
+    Word boundaries are digit-aware (``(?<!\\d)(?!\\d)``) so ``"14293"``
+    does not read as a 429 and ``"15003"`` does not read as a 500.
+    """
+    if not msg or not codes:
+        return False
+    pattern = r"(?<!\d)(?:" + "|".join(re.escape(c) for c in codes) + r")(?!\d)"
+    return re.search(pattern, msg) is not None
+
+
+_TRANSIENT_STATUS_CODES = (
+    "500",
+    "501",
+    "502",
+    "503",
+    "504",
+    "505",
+    "506",
+    "507",
+    "508",
+    "509",
+    "510",
+    "511",
+    "599",
+)
+
+
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Detect 429 rate-limit errors by status code or message text."""
     if hasattr(exc, "status_code") and getattr(exc, "status_code", None) == 429:
         return True
-    return "429" in str(exc)
+    return _mentions_status(str(exc), ("429",))
 
 
 class SourceRunError(RuntimeError):
@@ -3771,8 +3800,7 @@ def _is_transient_error(exc: Exception) -> bool:
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and 500 <= status < 600:
         return True
-    msg = str(exc)
-    return any(code in msg for code in ("500", "502", "503", "504"))
+    return _mentions_status(str(exc), _TRANSIENT_STATUS_CODES)
 
 
 def _topic_handle_mentions(topic: str) -> set[str]:
@@ -4538,7 +4566,10 @@ def _retrieve_stream(*args, **kwargs) -> tuple[list[dict], dict]:
     except Exception as exc:
         recorded_exc = exc
         if failures and not getattr(exc, "outcome_state", None):
-            failure = failures[-1]
+            failure = min(
+                failures,
+                key=lambda f: _FAILURE_SPECIFICITY.get(f.outcome_state, 9),
+            )
             recorded_exc = SourceRunError(str(exc), failure.outcome_state)
         if module_backed:
             http.fixture_source_record_error(fixture_request, recorded_exc)
@@ -4894,7 +4925,10 @@ def _retrieve_stream_impl(
         if pinned:
             chain = [pinned] + [b for b in chain if b != pinned]
         if not chain:
-            raise RuntimeError("No X backend is available.")
+            raise SourceRunError(
+                "No X backend is available (not configured).",
+                schema.SKIPPED_UNCONFIGURED,
+            )
         last_error = ""
         chain_errors: list[str] = []
         items = []
