@@ -38,10 +38,23 @@ func TestSetProcessGroupSetsSetpgid(t *testing.T) {
 func TestRunTimeoutKillsGrandchild(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "python3-group-stub.sh")
-	pidFile := filepath.Join(dir, "grandchild.pid")
+	inGroupPid := filepath.Join(dir, "grandchild.pid")
+	setsidPid := filepath.Join(dir, "setsid-grandchild.pid")
 	script := `#!/usr/bin/env bash
-sleep 30 &
-echo -n "$!" > "` + pidFile + `"
+# Grandchildren redirect their fds away from the stub's stdout/stderr:
+# otherwise a surviving orphan holds Go's exec pipe open and cmd.Wait()
+# blocks until the orphan exits, masking the leak as a slow pass.
+sleep 30 >/dev/null 2>&1 &
+echo -n "$!" > "` + inGroupPid + `"
+# True shape of the engine's descendants: lib/subproc.py spawns every
+# child with os.setsid, so node bird-search / yt-dlp / digg each lead
+# their own pgid that kill(-enginepid) can never reach. Only the
+# engine's SIGTERM handler (killpg per registered child) kills them —
+# modeled here by the trap, mirroring last30days._on_sigterm.
+setsid sleep 30 >/dev/null 2>&1 &
+SIDPID=$!
+echo -n "$SIDPID" > "` + setsidPid + `"
+trap 'kill -TERM "$SIDPID" 2>/dev/null; exit 143' TERM
 sleep 30
 `
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
@@ -61,16 +74,47 @@ sleep 30
 		t.Fatal("TimedOut = false, want true")
 	}
 
+	assertPidDead(t, inGroupPid, "in-group grandchild")
+	assertPidDead(t, setsidPid, "setsid grandchild")
+}
+
+// TestTermProcessGroupSendsSigterm checks the first phase of the deadline
+// path directly: a process in its own group must exit promptly after
+// termProcessGroup (no SIGKILL backstop involved).
+func TestTermProcessGroupSendsSigterm(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	setProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	termProcessGroup(cmd)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		killProcessGroup(cmd)
+		<-done
+		t.Fatal("process survived SIGTERM group kill; SIGKILL backstop fired")
+	}
+}
+
+// assertPidDead reads a pid from pidFile and polls until no process with
+// that pid exists. A SIGKILL-only deadline path leaves the setsid
+// grandchild alive (its pgid differs), so this fails without the
+// SIGTERM-first discipline.
+func assertPidDead(t *testing.T, pidFile, what string) {
+	t.Helper()
 	raw, readErr := os.ReadFile(pidFile)
 	if readErr != nil {
-		t.Fatalf("grandchild pid file missing: %v", readErr)
+		t.Fatalf("%s pid file missing: %v", what, readErr)
 	}
 	pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if convErr != nil || pid <= 0 {
-		t.Fatalf("bad grandchild pid %q: %v", raw, convErr)
+		t.Fatalf("bad %s pid %q: %v", what, raw, convErr)
 	}
 
-	// SIGKILL delivery is async; poll for the process to disappear.
+	// Signal delivery is async; poll for the process to disappear.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if kerr := syscall.Kill(pid, 0); kerr != nil {
@@ -82,7 +126,7 @@ sleep 30
 		if time.Now().After(deadline) {
 			// Best-effort cleanup so a regression does not leak sleeps.
 			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatalf("grandchild pid %d still alive 5s after timeout; group kill failed", pid)
+			t.Fatalf("%s pid %d still alive 5s after timeout; group kill failed", what, pid)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

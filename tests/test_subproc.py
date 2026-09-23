@@ -112,7 +112,33 @@ class TestRunWithTimeout(unittest.TestCase):
         self.assertIsInstance(seen_pids[0], int)
         self.assertGreater(seen_pids[0], 0)
 
-    def test_timeout_falls_back_to_kill_when_killpg_unavailable(self):
+    def test_child_pid_registered_and_unregistered(self):
+        """Every run_with_timeout child is tracked in the engine registry.
+
+        Only bird_x wired on_pid, so yt-dlp/transcribe/digg children
+        escaped last30days._child_pids and survived engine SIGTERM. The
+        registry now lives in run_with_timeout itself; a fake engine
+        module observes register/unregister for the same pid.
+        """
+        import sys
+        import types
+
+        calls = []
+        fake = types.ModuleType("last30days")
+        fake.register_child_pid = lambda pid: calls.append(("reg", pid))
+        fake.unregister_child_pid = lambda pid: calls.append(("unreg", pid))
+        with patch.dict(sys.modules, {"last30days": fake}):
+            result = subproc.run_with_timeout(
+                get_shell_cmd("echo ok"),
+                timeout=5,
+            )
+        self.assertEqual(result.stdout.strip(), "ok")
+        regs = [pid for kind, pid in calls if kind == "reg"]
+        unregs = [pid for kind, pid in calls if kind == "unreg"]
+        self.assertEqual(len(regs), 1)
+        self.assertEqual(unregs, regs)
+
+    def test_registry_failure_never_breaks_run(self):
         """Simulate Windows (no killpg/getpgid) — should fall back to proc.kill()."""
         real_hasattr = builtins.hasattr
 

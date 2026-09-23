@@ -18,6 +18,42 @@ class SubprocTimeout(Exception):
     """Raised when a subprocess exceeds its timeout and is killed."""
 
 
+def _register_child(pid: int) -> None:
+    """Best-effort registration of a spawned child in the engine registry.
+
+    last30days.py keeps a process-wide set of live child PIDs whose
+    process groups are SIGTERMed by its SIGTERM handler / atexit cleanup
+    when the engine itself is terminated (e.g. MCP timeout). Each child
+    runs in its own pgid via os.setsid, so a group kill aimed at the
+    engine can never reach them — only this registry can. Registration
+    lives here instead of at each call site so every present and future
+    caller (bird, yt-dlp, transcribe, digg, ...) is covered. The lazy
+    import mirrors bird_x: lib/ must stay importable without the engine
+    entrypoint, and last30days imports lib/, so a top-level import would
+    be circular. Failures never break the run.
+    """
+    try:
+        from last30days import register_child_pid
+    except ImportError:
+        return
+    try:
+        register_child_pid(pid)
+    except Exception:
+        pass
+
+
+def _unregister_child(pid: int) -> None:
+    """Best-effort removal from the engine registry (see _register_child)."""
+    try:
+        from last30days import unregister_child_pid
+    except ImportError:
+        return
+    try:
+        unregister_child_pid(pid)
+    except Exception:
+        pass
+
+
 @dataclass
 class SubprocResult:
     """Result of a subprocess run that captured stdout and stderr."""
@@ -47,8 +83,9 @@ def run_with_timeout(
         timeout: Timeout in seconds passed to ``communicate()``.
         env: Optional environment dict. If None, inherits parent env.
         on_pid: Optional callable invoked with the child PID right after
-            spawn. Used by bird_x.py to register child PIDs for cleanup
-            tracking. Exceptions raised by the callback are suppressed.
+            spawn (kept for backward compatibility; the child is now also
+            auto-registered in the engine registry — see _register_child).
+            Exceptions raised by the callback are suppressed.
 
     Returns:
         SubprocResult with returncode, stdout, and stderr as strings.
@@ -77,28 +114,14 @@ def run_with_timeout(
         except Exception:
             pass
 
+    _register_child(proc.pid)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
         try:
-            if hasattr(os, "killpg") and hasattr(os, "getpgid"):
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            else:
-                proc.kill()
-        except (ProcessLookupError, PermissionError, OSError, AttributeError):
-            proc.kill()
-        try:
-            proc.wait(timeout=5)
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            # Child ignored SIGTERM (or our killpg lost the race); escalate.
-            # Guard killpg/getpgid the same way the SIGTERM path above does:
-            # they are POSIX-only and raise AttributeError on Windows. The
-            # primary path was hardened in #552; this mirrors that guard on the
-            # escalation path (added later in #433) so the same crash can't
-            # re-surface here (#588).
             try:
                 if hasattr(os, "killpg") and hasattr(os, "getpgid"):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 else:
                     proc.kill()
             except (ProcessLookupError, PermissionError, OSError, AttributeError):
@@ -106,8 +129,26 @@ def run_with_timeout(
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                pass  # process unkillable (e.g. D-state); leave as zombie
-        raise SubprocTimeout(f"Command {cmd[0]} timed out after {timeout}s")
+                # Child ignored SIGTERM (or our killpg lost the race); escalate.
+                # Guard killpg/getpgid the same way the SIGTERM path above does:
+                # they are POSIX-only and raise AttributeError on Windows. The
+                # primary path was hardened in #552; this mirrors that guard on the
+                # escalation path (added later in #433) so the same crash can't
+                # re-surface here (#588).
+                try:
+                    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except (ProcessLookupError, PermissionError, OSError, AttributeError):
+                    proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass  # process unkillable (e.g. D-state); leave as zombie
+            raise SubprocTimeout(f"Command {cmd[0]} timed out after {timeout}s")
+    finally:
+        _unregister_child(proc.pid)
 
     return SubprocResult(
         returncode=proc.returncode,
