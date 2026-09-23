@@ -88,14 +88,39 @@ func Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
 	defer cancel()
 
 	args := append([]string{scriptPath}, opts.Args...)
-	cmd := exec.CommandContext(subCtx, pythonPath, args...)
+	cmd := exec.Command(pythonPath, args...)
 	cmd.Env = buildEnv(opts.CacheDir, opts.ExtraEnv)
+	// Own process group so a timeout kill reaches grandchildren (node
+	// bird-search, yt-dlp, grok CLI). exec.CommandContext would SIGKILL
+	// only the direct python child while its atexit SIGTERM cleanup never
+	// runs on SIGKILL, orphaning the group. Mirrors lib/subproc.py.
+	setProcessGroup(cmd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = cmd.Run()
+	if err := cmd.Start(); err != nil {
+		res := &RunResult{
+			Stdout:   stdout.Bytes(),
+			Stderr:   stderr.Bytes(),
+			ExitCode: 0,
+			TimedOut: errors.Is(subCtx.Err(), context.DeadlineExceeded),
+		}
+		return res, fmt.Errorf("engine: subprocess failed to start: %w", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	select {
+	case <-subCtx.Done():
+		// Deadline or parent cancel: kill the whole group, then reap.
+		killProcessGroup(cmd)
+		err = <-waitCh
+	case werr := <-waitCh:
+		err = werr
+	}
+
 	res := &RunResult{
 		Stdout:   stdout.Bytes(),
 		Stderr:   stderr.Bytes(),
