@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -18,40 +19,41 @@ class SubprocTimeout(Exception):
     """Raised when a subprocess exceeds its timeout and is killed."""
 
 
-def _register_child(pid: int) -> None:
-    """Best-effort registration of a spawned child in the engine registry.
-
-    last30days.py keeps a process-wide set of live child PIDs whose
-    process groups are SIGTERMed by its SIGTERM handler / atexit cleanup
-    when the engine itself is terminated (e.g. MCP timeout). Each child
-    runs in its own pgid via os.setsid, so a group kill aimed at the
-    engine can never reach them — only this registry can. Registration
-    lives here instead of at each call site so every present and future
-    caller (bird, yt-dlp, transcribe, digg, ...) is covered. The lazy
-    import mirrors bird_x: lib/ must stay importable without the engine
-    entrypoint, and last30days imports lib/, so a top-level import would
-    be circular. Failures never break the run.
-    """
-    try:
-        from last30days import register_child_pid
-    except ImportError:
-        return
-    try:
-        register_child_pid(pid)
-    except Exception:
-        pass
+# Live run_with_timeout children, process-wide. Each child is a session
+# leader (os.setsid), so a group kill aimed at the engine never reaches it;
+# the engine's SIGTERM handler and atexit hook drain this set instead. It
+# lives here, not in last30days.py, because the entrypoint runs as
+# __main__: importing it by name from lib/ executes a second module copy
+# with its own empty registry, and on a worker thread that copy cannot
+# install its signal handler either. RLock because cleanup_children runs
+# inside a signal handler on the main thread, which may already hold the
+# lock in register_child_pid.
+_child_pids: set[int] = set()
+_child_pids_lock = threading.RLock()
 
 
-def _unregister_child(pid: int) -> None:
-    """Best-effort removal from the engine registry (see _register_child)."""
-    try:
-        from last30days import unregister_child_pid
-    except ImportError:
-        return
-    try:
-        unregister_child_pid(pid)
-    except Exception:
-        pass
+def register_child_pid(pid: int) -> None:
+    with _child_pids_lock:
+        _child_pids.add(pid)
+
+
+def unregister_child_pid(pid: int) -> None:
+    with _child_pids_lock:
+        _child_pids.discard(pid)
+
+
+def cleanup_children() -> None:
+    """SIGTERM the process group of every registered live child."""
+    with _child_pids_lock:
+        pids = list(_child_pids)
+    for pid in pids:
+        try:
+            if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
 
 
 @dataclass
@@ -83,9 +85,8 @@ def run_with_timeout(
         timeout: Timeout in seconds passed to ``communicate()``.
         env: Optional environment dict. If None, inherits parent env.
         on_pid: Optional callable invoked with the child PID right after
-            spawn (kept for backward compatibility; the child is now also
-            auto-registered in the engine registry — see _register_child).
-            Exceptions raised by the callback are suppressed.
+            spawn. Exceptions raised by the callback are suppressed. The
+            child is registered for cleanup_children() regardless.
 
     Returns:
         SubprocResult with returncode, stdout, and stderr as strings.
@@ -114,7 +115,7 @@ def run_with_timeout(
         except Exception:
             pass
 
-    _register_child(proc.pid)
+    register_child_pid(proc.pid)
     try:
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -148,7 +149,7 @@ def run_with_timeout(
                     pass  # process unkillable (e.g. D-state); leave as zombie
             raise SubprocTimeout(f"Command {cmd[0]} timed out after {timeout}s")
     finally:
-        _unregister_child(proc.pid)
+        unregister_child_pid(proc.pid)
 
     return SubprocResult(
         returncode=proc.returncode,

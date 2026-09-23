@@ -112,33 +112,91 @@ class TestRunWithTimeout(unittest.TestCase):
         self.assertIsInstance(seen_pids[0], int)
         self.assertGreater(seen_pids[0], 0)
 
-    def test_child_pid_registered_and_unregistered(self):
-        """Every run_with_timeout child is tracked in the engine registry.
-
-        Only bird_x wired on_pid, so yt-dlp/transcribe/digg children
-        escaped last30days._child_pids and survived engine SIGTERM. The
-        registry now lives in run_with_timeout itself; a fake engine
-        module observes register/unregister for the same pid.
-        """
-        import sys
-        import types
-
-        calls = []
-        fake = types.ModuleType("last30days")
-        fake.register_child_pid = lambda pid: calls.append(("reg", pid))
-        fake.unregister_child_pid = lambda pid: calls.append(("unreg", pid))
-        with patch.dict(sys.modules, {"last30days": fake}):
+    def test_child_pid_registered_during_run_and_cleared_after(self):
+        """Every run_with_timeout child is in the cleanup registry while alive."""
+        seen = []
+        with patch.object(
+            subproc, "register_child_pid", wraps=subproc.register_child_pid
+        ) as reg, patch.object(
+            subproc, "unregister_child_pid", wraps=subproc.unregister_child_pid
+        ) as unreg:
             result = subproc.run_with_timeout(
                 get_shell_cmd("echo ok"),
                 timeout=5,
+                on_pid=seen.append,
             )
         self.assertEqual(result.stdout.strip(), "ok")
-        regs = [pid for kind, pid in calls if kind == "reg"]
-        unregs = [pid for kind, pid in calls if kind == "unreg"]
-        self.assertEqual(len(regs), 1)
-        self.assertEqual(unregs, regs)
+        reg.assert_called_once_with(seen[0])
+        unreg.assert_called_once_with(seen[0])
+        self.assertEqual(subproc._child_pids, set())
 
-    def test_registry_failure_never_breaks_run(self):
+    def test_timed_out_child_is_unregistered(self):
+        with self.assertRaises(subproc.SubprocTimeout):
+            subproc.run_with_timeout(get_shell_cmd("sleep 10"), timeout=1)
+        self.assertEqual(subproc._child_pids, set())
+
+    @unittest.skipIf(IS_WINDOWS, "process groups are POSIX-only")
+    def test_cleanup_children_kills_group_spawned_on_worker_thread(self):
+        """Pipeline sources spawn on ThreadPoolExecutor workers; the main-thread
+        SIGTERM handler must see those children in the same registry and kill
+        the whole setsid group, grandchildren included."""
+        import tempfile
+        import threading
+        import time
+
+        outcome = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = real_os.path.join(tmp, "grandchild.pid")
+
+            def worker():
+                try:
+                    subproc.run_with_timeout(
+                        ["sh", "-c", f"sleep 30 & echo $! > {pidfile}; wait"],
+                        timeout=20,
+                        on_pid=lambda pid: outcome.update(pid=pid),
+                    )
+                    outcome["error"] = None
+                except Exception as exc:
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=worker)
+            start = time.monotonic()
+            thread.start()
+            deadline = start + 5
+            while time.monotonic() < deadline and not (
+                real_os.path.exists(pidfile) and real_os.path.getsize(pidfile)
+            ):
+                time.sleep(0.01)
+            self.assertTrue(real_os.path.getsize(pidfile))
+            self.assertIn(outcome["pid"], subproc._child_pids)
+
+            subproc.cleanup_children()
+            thread.join(10)
+
+        # The backgrounded sleep inherits the stdout pipe, so communicate()
+        # returns well before the 20s timeout only if the grandchild died too.
+        self.assertFalse(thread.is_alive())
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertIsNone(outcome["error"])
+        self.assertEqual(subproc._child_pids, set())
+
+    def test_lib_never_imports_engine_entrypoint(self):
+        """last30days.py runs as __main__; importing it by name from lib/
+        executes a second copy whose state (child registry, signal handler)
+        the running engine never sees."""
+        import pathlib
+        import re
+
+        lib_dir = pathlib.Path(subproc.__file__).parent
+        pattern = re.compile(r"^\s*(from\s+last30days\s+import|import\s+last30days\b)", re.M)
+        offenders = [
+            str(path.relative_to(lib_dir))
+            for path in lib_dir.rglob("*.py")
+            if pattern.search(path.read_text(encoding="utf-8", errors="replace"))
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_timeout_falls_back_to_kill_when_killpg_unavailable(self):
         """Simulate Windows (no killpg/getpgid) — should fall back to proc.kill()."""
         real_hasattr = builtins.hasattr
 
