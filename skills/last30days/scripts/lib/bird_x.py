@@ -424,11 +424,26 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
     }
 
 
+def _clamped_bird_timeout(base: int, deadline: Optional[float]) -> Optional[int]:
+    """Per-attempt timeout clamped to the chain's remaining budget.
+
+    Returns None when the deadline already passed so the caller skips the
+    subprocess instead of starting a call guaranteed to overrun the chain.
+    """
+    if deadline is None:
+        return base
+    remaining = deadline - time.monotonic()
+    if remaining < 1:
+        return None
+    return max(1, min(base, int(remaining)))
+
+
 def search_x(
     topic: str,
     from_date: str,
     to_date: str,
     depth: str = "default",
+    deadline: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Search X using Bird CLI with automatic retry on 0 results.
 
@@ -437,12 +452,19 @@ def search_x(
         from_date: Start date (YYYY-MM-DD)
         to_date: End date (YYYY-MM-DD) - unused but kept for API compatibility
         depth: Research depth - "quick", "default", or "deep"
+        deadline: Optional shared wall-clock deadline (``time.monotonic()``
+            instant) from the X backend chain. Each of the up-to-four
+            sequential searches clamps its per-attempt timeout to the time
+            left; searches past the deadline never start.
 
     Returns:
         Raw Bird JSON response or error dict.
     """
     count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
-    timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
+    base_timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
+    timeout = _clamped_bird_timeout(base_timeout, deadline)
+    if timeout is None:
+        return {"error": "bird: chain budget exhausted", "items": []}
 
     # Extract core subject - X search is literal, not semantic
     core_subject = _extract_core_subject(topic)
@@ -466,6 +488,9 @@ def search_x(
             or_parts = ' OR '.join(f'"{t}"' for t in compounds[:3])
             _log(f"0 results for '{core_topic}', retrying with OR groups: {or_parts}")
             query = f"({or_parts}) since:{from_date}"
+            timeout = _clamped_bird_timeout(base_timeout, deadline)
+            if timeout is None:
+                return {"error": "bird: chain budget exhausted", "items": []}
             response = _run_bird_search(query, count, timeout)
             if not response.get("error"):
                 last_clean_response = response
@@ -476,6 +501,9 @@ def search_x(
         shorter = ' '.join(core_words[:2])
         _log(f"0 results for '{core_topic}', retrying with '{shorter}'")
         query = f"{shorter} since:{from_date}"
+        timeout = _clamped_bird_timeout(base_timeout, deadline)
+        if timeout is None:
+            return {"error": "bird: chain budget exhausted", "items": []}
         response = _run_bird_search(query, count, timeout)
         if not response.get("error"):
             last_clean_response = response
@@ -501,6 +529,9 @@ def search_x(
             retry_terms = anchor if strongest == anchor else f"{anchor} {strongest}"
             _log(f"0 results for '{core_topic}', retrying anchored on '{retry_terms}'")
             query = f"{retry_terms} since:{from_date}"
+            timeout = _clamped_bird_timeout(base_timeout, deadline)
+            if timeout is None:
+                return {"error": "bird: chain budget exhausted", "items": []}
             response = _run_bird_search(query, count, timeout)
             if not response.get("error"):
                 last_clean_response = response

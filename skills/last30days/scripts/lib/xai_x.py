@@ -90,6 +90,11 @@ def search_x(
             instant) from the X backend chain. Bounds the whole call including
             retries; without one this call owns its own timeout only.
 
+    The transport runs with ``retries=1`` (a global default change from the
+    inherited ``retries=5``): one 90-180s live-search call must not become a
+    10-15 minute stall. DNS-resolution failures are the exception: the
+    transport widens those to three attempts.
+
     Returns:
         Raw API response
     """
@@ -126,9 +131,9 @@ def search_x(
         ],
     }
 
-    # A single attempt: the per-call timeout already spans the model's full
-    # live-search latency, and the inherited http default (retries=5) would
-    # turn one 90-180s call into a 10-15 minute stall. The shared chain
+    # A single non-DNS attempt: the per-call timeout already spans the model's
+    # full live-search latency, and the inherited http default (retries=5)
+    # would turn one 90-180s call into a 10-15 minute stall. The shared chain
     # deadline bounds the wait wall-clock; failover to the next X backend
     # covers the miss.
     return http.post(
