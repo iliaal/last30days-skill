@@ -36,7 +36,7 @@ def _normalize_url(url: str) -> str:
             netloc = netloc[len(prefix):]
     # Strip tracking params
     params = parse_qs(parsed.query)
-    clean_params = {k: v for k, v in params.items() if not k.startswith("utm_")}
+    clean_params = {k: v for k, v in params.items() if not k.lower().startswith("utm_")}
     query = urlencode(clean_params, doseq=True)
     return urlunparse((parsed.scheme.lower(), netloc, parsed.path.rstrip("/"), "", query, ""))
 

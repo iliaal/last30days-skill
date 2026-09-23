@@ -449,6 +449,19 @@ class TestUrlNormalization(unittest.TestCase):
             _normalize_url("https://youtube.com/watch?v=abc123"),
         )
 
+    def test_uppercase_utm_params_stripped(self):
+        # Tracking params strip case-insensitively, so an uppercase
+        # UTM param does not poison the dedup key.
+        from lib.fusion import _normalize_url
+        self.assertEqual(
+            _normalize_url("https://example.com/page?UTM_SOURCE=x"),
+            _normalize_url("https://example.com/page"),
+        )
+        self.assertEqual(
+            _normalize_url("https://example.com/page?UTM_SOURCE=x"),
+            _normalize_url("https://example.com/page?utm_source=y"),
+        )
+
 if __name__ == "__main__":
     unittest.main()
 
