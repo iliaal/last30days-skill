@@ -640,7 +640,7 @@ def persist_report(report: schema.Report, store_db: Path | None = None) -> dict[
         store.init_db()
         if private_corpus:
             store.ensure_private_db_files()
-        topic_row = store.add_topic(report.topic)
+        topic_row = store.add_topic(report.topic, update_existing=False)
         topic_id = topic_row["id"]
         source_mode = ",".join(sorted(report.items_by_source)) or "v3"
         run_id = store.record_run(topic_id, source_mode=source_mode, status="running")

@@ -298,8 +298,10 @@ def add_topic(
     name: str,
     search_queries: Optional[List[str]] = None,
     schedule: str = "0 8 * * *",
+    *,
+    update_existing: bool = True,
 ) -> Dict[str, Any]:
-    """Add a topic to the watchlist. Returns the topic dict."""
+    """Add a topic, optionally preserving an existing topic's configuration."""
     init_db()
     conn = _connect()
     try:
@@ -310,8 +312,9 @@ def add_topic(
                ON CONFLICT(name) DO UPDATE SET
                    search_queries = excluded.search_queries,
                    schedule = excluded.schedule,
-                   updated_at = datetime('now')""",
-            (name, queries_json, schedule),
+                   updated_at = datetime('now')
+               WHERE ?""",
+            (name, queries_json, schedule, update_existing),
         )
         conn.commit()
         row = conn.execute(
