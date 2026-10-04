@@ -3348,7 +3348,7 @@ def _main(
             ),
         )
         if not results["env_written"]:
-            sys.stderr.write("Setup could not save the browser-cookie decision; configuration was not saved.\n")
+            sys.stderr.write("Setup configuration could not be fully saved; some settings may already be saved.\n")
             return 1
         sys.stderr.write(setup_wizard.get_setup_status_text(results) + "\n")
         return 0

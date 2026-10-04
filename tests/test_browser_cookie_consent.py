@@ -1,12 +1,14 @@
 """Durable browser consent at config, setup, and CDP boundaries."""
 
+import os
 import sys
+from pathlib import Path
 from unittest import mock
 
 import pytest
 
 import last30days as cli
-from lib import chrome_cdp, env
+from lib import chrome_cdp, env, setup_wizard
 
 
 @pytest.fixture
@@ -109,4 +111,43 @@ def test_setup_reports_failure_when_consent_cannot_be_saved(browser_session, cap
         mock.patch.object(sys, "argv", ["last30days.py", "setup"]),
     ):
         assert cli.main() == 1
-    assert "could not save the browser-cookie decision" in capsys.readouterr().err
+    assert "configuration could not be fully saved" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("allow_cookies", [False, True])
+def test_setup_reports_partial_save_without_reverting_consent(
+    browser_session, capsys, allow_cookies,
+):
+    env_path, cdp, native, _ = browser_session
+    previous_consent = "false" if allow_cookies else "true"
+    env_path.write_text(f"BROWSER_CONSENT={previous_consent}\nFROM_BROWSER=chrome\n")
+    real_open = os.open
+
+    def fail_completion_append(path, flags, *args, **kwargs):
+        if Path(path) == env_path and flags & os.O_APPEND:
+            raise OSError("test-only completion write failure")
+        return real_open(path, flags, *args, **kwargs)
+
+    argv = ["last30days.py", "setup"]
+    if allow_cookies:
+        argv.append("--allow-browser-cookies")
+    with (
+        mock.patch.object(setup_wizard, "run_auto_setup", return_value={"cookies_found": {}}),
+        mock.patch.object(setup_wizard.os, "open", side_effect=fail_completion_append),
+        mock.patch.object(sys, "argv", argv),
+    ):
+        assert cli.main() == 1
+
+    persisted = env.load_env_file(env_path)
+    assert persisted["BROWSER_CONSENT"] == ("true" if allow_cookies else "false")
+    assert "SETUP_COMPLETE" not in persisted
+    assert persisted["FROM_BROWSER"] == "chrome"
+    if not allow_cookies:
+        for _ in range(2):
+            config = env.get_config(env.ConfigLoadPolicy(browser_cookies="read"))
+            assert not config.get("AUTH_TOKEN")
+        cdp.assert_not_called()
+        native.assert_not_called()
+    stderr = capsys.readouterr().err
+    assert "some settings may already be saved" in stderr
+    assert "configuration was not saved" not in stderr
