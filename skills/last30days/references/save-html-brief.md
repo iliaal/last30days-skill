@@ -63,7 +63,7 @@ SLUG=$(printf '%s\n' "${TOPIC}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '
 HTML_PATH=$(
   HTML_TMP=$(mktemp "${LAST30DAYS_MEMORY_DIR}/.last30days-html.XXXXXXXX") || exit "$?"
   trap 'rm -f -- "${HTML_TMP}"' EXIT
-  "${LAST30DAYS_PYTHON}" "${SKILL_ROOT}/scripts/last30days.py" "${TOPIC}" \
+  "${LAST30DAYS_PYTHON}" "${SKILL_DIR}/scripts/last30days.py" "${TOPIC}" \
     --emit=html \
     --synthesis-file "${SYNTHESIS_FILE}" \
     "${SCOPE_FLAGS[@]}" \
@@ -129,7 +129,7 @@ When the user chooses the built-in `ht-ml.app` path, add `--publish-html` to the
 
 ```bash
 LAST30DAYS_PUBLISH_PASSWORD="${PUBLISH_PASSWORD:-}" \
-"${LAST30DAYS_PYTHON}" "${SKILL_ROOT}/scripts/last30days.py" "${TOPIC}" \
+"${LAST30DAYS_PYTHON}" "${SKILL_DIR}/scripts/last30days.py" "${TOPIC}" \
   --emit=html \
   --synthesis-file "$SYNTHESIS_FILE" \
   --output "$HTML_PATH" \

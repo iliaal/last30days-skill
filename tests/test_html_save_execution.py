@@ -45,13 +45,13 @@ sys.exit(int(os.environ.get('RENDER_EXIT', '0')))
     env = {
         **os.environ,
         "LAST30DAYS_PYTHON": sys.executable,
-        "SKILL_ROOT": str(skill_root),
         "SKILL_DIR": str(skill_root),
         "LAST30DAYS_MEMORY_DIR": str(output_dir),
         "SYNTHESIS_FILE": str(synthesis),
         "TOPIC": "Shell Safety",
         "RENDER_CONTENT": "<html>first report</html>",
     }
+    env.pop("SKILL_ROOT", None)
     text = REFERENCE.read_text(encoding="utf-8")
     block = text.split("```bash\n", 1)[1].split("```", 1)[0]
     flow = block[block.index("SLUG="):]
