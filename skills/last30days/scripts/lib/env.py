@@ -288,9 +288,9 @@ def load_env_file(path: Path) -> dict[str, str]:
             # Remove quotes if present
             if value and value[0] in ('"', "'") and value[-1] == value[0]:
                 value = value[1:-1]
-            # Empty LAST30DAYS_YT_PLAYER_CLIENT is a persisted disable; other
-            # keys still drop blanks so secrets cannot be set to "".
-            if key and (value or key == 'LAST30DAYS_YT_PLAYER_CLIENT'):
+            # These settings use empty as a persisted disable; secrets still
+            # drop blanks instead of overriding a configured credential.
+            if key and (value or key in {'LAST30DAYS_YT_PLAYER_CLIENT', 'LAST30DAYS_MEMORY_DIR'}):
                 env.update({key: value})
     return env
 
@@ -492,6 +492,23 @@ def _find_project_env() -> Path | None:
         if parent == Path.home() or parent == parent.parent:
             break
     return None
+
+
+def resolve_memory_dir(save_dir: str | None = None) -> str:
+    """Resolve the skill's save directory without credential-store access."""
+    value = save_dir
+    if value is None:
+        value = os.environ.get("LAST30DAYS_MEMORY_DIR")
+    if value is None:
+        file_env = load_env_file(CONFIG_FILE) if CONFIG_FILE else {}
+        if _project_config_trusted(ConfigLoadPolicy(), file_env):
+            project_path = _find_project_env()
+            if project_path:
+                file_env.update(load_env_file(project_path))
+        value = file_env.get("LAST30DAYS_MEMORY_DIR")
+    if value is None:
+        value = str(Path.home() / "Documents" / "Last30Days")
+    return str(Path(value).expanduser().absolute()) if value else ""
 
 
 def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
@@ -721,7 +738,7 @@ def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
             # Process env only; the .env value never reaches config.
             config[key] = os.environ.get(key) or default
             continue
-        if key == 'LAST30DAYS_YT_PLAYER_CLIENT':
+        if key in {'LAST30DAYS_YT_PLAYER_CLIENT', 'LAST30DAYS_MEMORY_DIR'}:
             # Empty string is a valid disable; `or` would treat it as unset.
             if key in os.environ:
                 config[key] = os.environ.get(key)

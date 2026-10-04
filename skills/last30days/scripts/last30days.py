@@ -776,6 +776,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Disable browser-cookie extraction even when FROM_BROWSER is configured")
     parser.add_argument("--save-dir", help="Optional directory for saving the rendered output")
     parser.add_argument(
+        "--resolve-save-dir", action="store_true",
+        help="Print the skill save directory from flags/config, then exit without research",
+    )
+    parser.add_argument(
         "--corpus",
         action="append",
         default=[],
@@ -3183,6 +3187,9 @@ def _main(
     topic = " ".join(args.topic).strip()
     original_topic = topic
     _validate_extra_argv(parser, topic, extra_argv)
+    if args.resolve_save_dir:
+        print(env.resolve_memory_dir(args.save_dir))
+        return 0
     if args.x_posts is not None and _looks_inline_json(args.x_posts):
         sys.stderr.write(
             "[last30days] --x-posts accepts a file path only (inline JSON is not "

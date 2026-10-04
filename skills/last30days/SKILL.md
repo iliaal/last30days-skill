@@ -245,10 +245,12 @@ End of OUTPUT CONTRACT. The laws above are the contract; everything below is imp
 
 # HOW TO INVOKE THIS SKILL (READ FIRST, FOLLOW EVERY TIME)
 
+**Save-directory resolution:** The commands below query the engine's trusted configuration before selecting a directory. Never source a `.env` file in the shell. If the user supplies a one-off save directory, add `--save-dir="<requested directory>"` to the `--resolve-save-dir` command and remove duplicate save-directory flags from the research arguments. Preserve an empty result: it disables research file saves and the saved-file appendix. Resolve once per research/discovery run; carry the exact resulting value into every later command. If shell tool calls do not share variables, explicitly restore that captured value (including an empty string) in each later call instead of resolving configuration again.
+
 **LIBRARY SEARCH FAST PATH — this overrides every research/setup step below.** If the user says “search my library for X”, “have I researched X before?”, or otherwise asks to query prior saved research, do not run WebSearch, setup, preflight, or fresh source research. Run:
 
 ```bash
-LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
+LAST30DAYS_MEMORY_DIR="$("${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" --resolve-save-dir)" || exit
 "${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" library search "${LIBRARY_QUERY}" --save-dir="${LAST30DAYS_MEMORY_DIR}"
 ```
 
@@ -257,7 +259,7 @@ Relay the dated, topic-grouped matches. This is deterministic offline FTS over t
 **LIBRARY FEED FAST PATH — this overrides every research/setup step below.** If the user asks to build, view, refresh, or subscribe to their saved research library/feed, do not run host WebSearch resolution, the first-run setup gate, topic preflight, or source research. Run:
 
 ```bash
-LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
+LAST30DAYS_MEMORY_DIR="$("${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" --resolve-save-dir)" || exit
 "${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" library feed --save-dir="${LAST30DAYS_MEMORY_DIR}"
 ```
 
@@ -266,14 +268,14 @@ Relay the generated local `index.html` and `feed.xml` paths. If the user explici
 **TOPIC QUEUE FAST PATH — this overrides every research/setup step below.** If the user asks "what's in my topic queue", "what should I talk about next", "what topics haven't I covered", "show my content pipeline", "mark <topic> as covered", "I covered X on the podcast", "we published that article", or similar — even cold, with no research run earlier in this session — do not run WebSearch, setup, preflight, or fresh source research. Run the read form:
 
 ```bash
-LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
+LAST30DAYS_MEMORY_DIR="$("${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" --resolve-save-dir)" || exit
 "${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" queue list --save-dir="${LAST30DAYS_MEMORY_DIR}"
 ```
 
 or the cover form, for "mark X as covered" phrasing:
 
 ```bash
-LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
+LAST30DAYS_MEMORY_DIR="$("${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" --resolve-save-dir)" || exit
 "${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" queue cover "<topic name>" --save-dir="${LAST30DAYS_MEMORY_DIR}"
 ```
 
@@ -323,8 +325,9 @@ Branching rule:
   **Leg 1 - nominate (Bash timeout 180000).** Sweep the listings and write the nominations bundle:
 
 ```bash
-LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
+LAST30DAYS_MEMORY_DIR="$("${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" --resolve-save-dir)" || exit
 # Global trending: --discover with NO domain. Domain trending: --discover "${DISCOVERY_DOMAIN}".
+printf 'Resolved save directory: <%s>\n' "$LAST30DAYS_MEMORY_DIR" >&2
 "${LAST30DAYS_PYTHON}" "${SKILL_DIR}/scripts/last30days.py" --discover --nominate-only --save-dir="${LAST30DAYS_MEMORY_DIR}"
 ```
 
@@ -352,7 +355,7 @@ LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
   **Leg 2 - research (Bash timeout 600000).** Write the judgments file and run the resume leg in the SAME Bash call, using the established tmpfile pattern (mktemp XXXXXX + trap + `cat >|` + quoted heredoc - same rules as the Step 0.75 plan tmpfile; run the block directly in your shell tool, NEVER wrapped in `bash -lc '...'`):
 
 ```bash
-LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
+: "${LAST30DAYS_MEMORY_DIR?Restore the exact save directory captured in discovery leg 1}"
 # Trailing XXXXXX (no .json suffix) for BSD/macOS mktemp; >| because mktemp
 # already created the file (a plain > is refused under `set -o noclobber`).
 JUDGMENTS_FILE=$(mktemp "${TMPDIR:-/tmp}/last30days-judgments.XXXXXX")
@@ -385,7 +388,7 @@ JUDGE_EOF
   **Leg 3 - finalize (Bash timeout 60000).** Second tmpfile (sentinel `ANGLE_EOF`), same pattern, same Bash call as the finalize command:
 
 ```bash
-LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
+: "${LAST30DAYS_MEMORY_DIR?Restore the exact save directory captured in discovery leg 1}"
 ANGLES_FILE=$(mktemp "${TMPDIR:-/tmp}/last30days-angles.XXXXXX")
 trap 'rm -f "$ANGLES_FILE"' EXIT
 cat >| "$ANGLES_FILE" <<'ANGLE_EOF'
@@ -397,7 +400,7 @@ ANGLE_EOF
   It applies your angles, renders the final topic-per-section brief, saves artifacts, and records the topic queue - offline, no network. **Relay its stdout verbatim** per the DISCOVERY bullet in the OUTPUT CONTRACT - including a **"Nothing solid this window"** result, which is a valid, honest outcome (the confidence floor found no topic with enough cross-source confirmation or engagement; do NOT retry, work around it, or fabricate topics - relay it and suggest a narrower domain or a direct topic run).
 
   **Protocol rules:**
-  - ONE identical `--save-dir="${LAST30DAYS_MEMORY_DIR}"` threaded through all three commands. The handoff files (`discover-nominations.json`, `discover-pending.json`) live in that directory; a different or missing save dir on a later leg means the leg cannot find them.
+  - ONE identical `--save-dir="${LAST30DAYS_MEMORY_DIR}"` threaded through all three commands. Capture the resolved value in leg 1 and restore it unchanged for legs 2 and 3, even if configuration or working directory changes. The handoff files (`discover-nominations.json`, `discover-pending.json`) live in that directory; a different save dir on a later leg means the leg cannot find them. When saving is explicitly disabled with an empty value, all legs use the engine's config-directory handoff location; do not substitute the default memory directory.
   - Handoff files expire after one hour (TTL 3600s) - judge and finalize promptly, in the same session as the sweep.
   - Contract failures (missing/stale bundle or pending report, judgments/angles not bound to the current `bundle_id`, malformed file) exit 2 with the remedy named on stderr. Fix exactly what it names and re-run THAT leg.
   - **Degradation rule:** if any leg fails twice (exit 2, invalid file, timeout), fall back to the one-shot `"${LAST30DAYS_PYTHON}" "${SKILL_DIR}/scripts/last30days.py" --discover [domain] --emit=compact --save-dir="${LAST30DAYS_MEMORY_DIR}"` (Bash timeout 600000) and relay its brief - never leave the user with no output. Its one-shot heuristics note is expected on this path.
@@ -499,7 +502,8 @@ fi
   exit 1
 }
 
-LAST30DAYS_MEMORY_DIR="${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}"
+LAST30DAYS_MEMORY_DIR="$("${LAST30DAYS_PYTHON:-python3}" "${SKILL_DIR}/scripts/last30days.py" --resolve-save-dir)" || exit
+printf 'Resolved save directory: <%s>\n' "$LAST30DAYS_MEMORY_DIR" >&2
 ```
 
 **PYTHON VERSION GATE — when the Runtime Preflight Bash block above exits with a Python version error:**
@@ -527,7 +531,7 @@ Your host search is better than the engine's keyless web fallback, so this tells
 
 ## Configuration
 
-Set `LAST30DAYS_MEMORY_DIR` before invoking the skill to choose where raw research files are saved. If it is not set, the skill defaults to `~/Documents/Last30Days`. The engine creates this directory on first save.
+Set `LAST30DAYS_MEMORY_DIR` in the process environment, trusted project config, or global `~/.config/last30days/.env` to choose where raw research files are saved. Resolution follows that order after an explicit `--save-dir`. Only an absent setting defaults the skill to `~/Documents/Last30Days`; an explicitly empty value disables research file saves. The engine creates a nonempty directory on first save.
 
 The engine reads `LAST30DAYS_MEMORY_DIR` from either the process env or `~/.config/last30days/.env`, so direct CLI invocations (`python3 scripts/last30days.py ...`) without `--save-dir` will still save when the env var is set. Mirrors the `LAST30DAYS_STORE` env-or-flag convention. Explicit `--save-dir` always wins.
 
@@ -1724,6 +1728,8 @@ For ALL query types:
 ## Step 2.5: Append WebSearch Results to Saved Raw File
 
 **MANDATORY - do not skip this step.** Every post-engine WebSearch supplement you ran in Step 2 MUST be appended to the saved raw file under `LAST30DAYS_MEMORY_DIR` (defaults to `~/Documents/Last30Days`). Skipping this step is a common Opus 4.7 failure mode: the saved file ends at `## Source Coverage` with no appendix, future sessions cannot see what blog/tutorial/news sources informed the synthesis, and the user cannot trace where specific claims came from.
+
+If the resolved `LAST30DAYS_MEMORY_DIR` is empty, saving was disabled: skip this appendix step and do not create a file elsewhere.
 
 **LAW 1 OVERRIDE (read before synthesizing):** the WebSearch tool description declares a "MANDATORY Sources section" in its own contract. That instruction applies to generic WebSearch usage. Inside `/last30days` it is SUPERSEDED. The `## WebSearch Supplemental Results` appendix in the SAVED RAW FILE replaces the visible Sources section. Never emit a visible `Sources:` bullet list to the user. Your user-facing response ends at the invitation block. The emoji-tree footer's `🌐 Web:` line is the only visible citation. If you feel the pull to write a trailing `Sources:` section, you are about to violate LAW 1 — go back and delete it.
 

@@ -29,7 +29,7 @@ Each run produces one file per topic, slug-named:
 
 ### Recommended `.env` entry
 
-`.env` files don't travel between machines or harnesses, so set `LAST30DAYS_MEMORY_DIR` explicitly in `~/.config/last30days/.env` once per host. The `/last30days` slash command works without it (the SKILL.md wrapper has its own default), but **bare engine invocations** — `python3 scripts/last30days.py ...` from cron jobs, scripts, or agents that bypass the wrapper — silently no-op the file save unless the engine sees the env var. Mirrors the `LAST30DAYS_STORE` env-or-flag convention.
+`.env` files don't travel between machines or harnesses, so set `LAST30DAYS_MEMORY_DIR` explicitly in `~/.config/last30days/.env` once per host. The `/last30days` slash command resolves its directory through the engine: explicit `--save-dir` > process environment > trusted project `.claude/last30days.env` > global `.env` > `~/Documents/Last30Days`. An explicitly empty value disables research file saves and the saved-file appendix. Library and topic-queue commands use the same resolution; discovery captures the result once and reuses it for every protocol leg. **Bare engine invocations** — `python3 scripts/last30days.py ...` from cron jobs, scripts, or agents that bypass the wrapper — keep their existing no-save default when neither a flag nor configuration supplies a directory.
 
 ```bash
 # ~/.config/last30days/.env  (pick ONE — uncomment the line that matches your OS)
@@ -44,6 +44,7 @@ The engine's `.env` reader doesn't expand `$HOME` — only the tilde, via `Path(
 **Per-run overrides:**
 
 - `--save-dir <path>` - one-off output location. **Flag wins over env var.** If neither flag nor env var is set, the engine does not write a file (DB persistence is independent — see `LAST30DAYS_STORE` below).
+- `--resolve-save-dir` - print the absolute save directory selected for the skill and exit without research, browser-cookie reads, credential-store lookups, or file writes. It honors `--save-dir`, process environment, and trusted config files, preserving empty values. Only this query supplies the skill's `~/Documents/Last30Days` fallback; it does not change the bare research engine's no-save default. Shell wrappers capture this output without sourcing `.env` files.
 - `--output <file>` - write the rendered output to an exact file path, using the format selected by `--emit`.
 - `--json-profile {agent,raw}` - select the research JSON shape used with `--emit=json`. `agent` is the default, versioned workflow contract; `raw` preserves the full internal `Report` dump for debugging and power users. See the [JSON export reference](docs/reference/json-export.md).
 - `--corpus <dir>` - add a local `.md`/`.txt` directory as a private ranked source; repeat the flag for multiple directories. PDFs are extracted only when `pdftotext` is on PATH and otherwise skip with a note. File modification time supplies recency, so the normal research window applies.
@@ -72,7 +73,7 @@ The engine's `.env` reader doesn't expand `$HOME` — only the tilde, via `Path(
 - `--record-fixtures <dir>` - developer-only, hidden flag that records scrubbed source responses for the offline research-quality eval harness. It writes `<dir>/http.json`; see the [eval reference](docs/reference/eval.md) before recording or committing fixtures.
 - `setup --github-start` / `setup --github-poll` - the two-command ScrapeCreators GitHub device-auth split. `--github-start` submits the device flow, copies the code to the clipboard, opens the browser, and returns the code immediately (foreground); `--github-poll` waits for you to authorize and persists the key. `setup --github` still runs both in one shot for back-compat.
 
-The footer line `📎 Raw results saved to ${LAST30DAYS_MEMORY_DIR:-$HOME/Documents/Last30Days}/<slug>-raw.md` is the canonical pointer; if it shows backslashes on Windows update past v3.1.1.
+The footer line `📎 Raw results saved to <resolved memory directory>/<slug>-raw.md` is the canonical pointer; if it shows backslashes on Windows update past v3.1.1. An explicitly disabled save produces no saved-file pointer.
 
 Every completed research pass writes a structured `last-report.json` cache beside `last-run.json`. HTML follow-up renders use it so `--emit=html --synthesis-file` can reuse report metadata/footer without fetching sources again; `--drill <target>` uses it as the grounded starting point for targeted re-research; bare `--verify-freshness` updates only the cached report's claim verdicts. Reuse is intentionally short-lived: `LAST30DAYS_REPORT_CACHE_TTL_SECONDS` defaults to `3600` (one hour). Set it to another integer number of seconds to tune the window, or `0` to disable report-cache reuse and post-run follow-ups.
 
