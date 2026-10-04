@@ -5,7 +5,8 @@ from unittest import mock
 
 import pytest
 
-from lib import bird_x, pipeline, schema, subproc
+import last30days
+from lib import bird_x, dates, pipeline, schema, subproc
 
 
 def _response(items):
@@ -81,6 +82,42 @@ def test_current_day_search_retains_posts_from_the_whole_end_date():
     assert result["items"] == [last_second]
     assert run.call_count == 1
     assert f"until:{(today + timedelta(days=1)).isoformat()}" in run.call_args.args[0][2]
+
+
+@pytest.mark.parametrize("lane", ["topic", "from", "mentions"])
+@pytest.mark.parametrize(
+    ("end_date", "expected_filters"),
+    [
+        ("9999-12-31", "since:9999-12-01"),
+        ("9999-12-30", "since:9999-11-30 until:9999-12-31"),
+    ],
+)
+def test_cli_maximum_end_dates_reach_every_bird_lane(lane, end_date, expected_filters):
+    args = last30days.build_parser().parse_args(["multi-agent", "--as-of", end_date])
+    from_date, to_date = dates.get_date_range(as_of_date=args.as_of_date)
+    topic = " ".join(args.topic)
+    tweet = _tweet("5", f"{end_date}T23:59:59Z")
+    with mock.patch.object(
+        bird_x.subproc,
+        "run_with_timeout",
+        autospec=True,
+        return_value=_response([tweet]),
+    ) as run:
+        if lane == "topic":
+            result = bird_x.search_x(topic, from_date, to_date)
+            items = bird_x.parse_bird_response(result, query=topic)
+            expected = topic
+        elif lane == "from":
+            items = bird_x.search_handles(["subject"], topic, from_date, to_date=to_date)
+            expected = "from:subject"
+        else:
+            items = bird_x.search_mentions(["subject"], from_date, to_date=to_date)
+            expected = "@subject"
+
+    assert [item["url"] for item in items] == [tweet["url"]]
+    assert [call.args[0][2] for call in run.call_args_list] == [
+        f"{expected} {expected_filters}"
+    ]
 
 
 @pytest.mark.parametrize("lane", ["from", "mentions"])

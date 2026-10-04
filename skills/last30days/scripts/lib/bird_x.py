@@ -172,8 +172,12 @@ _GROUPING_CHARS = "“”()[]{}"
 def _date_filters(from_date: str, to_date: Optional[str] = None) -> str:
     filters = f"since:{from_date}"
     if to_date is not None:
+        end = date.fromisoformat(to_date)
+        if end == date.max:
+            # No supported post date lies beyond this inclusive upper bound.
+            return filters
         # The research window includes to_date; X's until bound is exclusive.
-        until = date.fromisoformat(to_date) + timedelta(days=1)
+        until = end + timedelta(days=1)
         filters += f" until:{until.isoformat()}"
     return filters
 
