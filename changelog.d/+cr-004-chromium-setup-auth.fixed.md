@@ -1,0 +1,1 @@
+Fixed browser selections being lost after consented setup, including Chromium and services signed in through different browsers, so later research can reuse their sessions without saving cookie values.

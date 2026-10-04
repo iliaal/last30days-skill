@@ -3325,21 +3325,13 @@ def _main(
             config,
             allow_browser_cookies=_setup_allows_browser_cookies(args, extra_argv),
         )
-        # Persist FROM_BROWSER only when every service's cookies came from the
-        # SAME single browser — then we can fast-path future runs to it. If
-        # different services matched different browsers, or none matched, leave
-        # FROM_BROWSER unset so the safe default remains no browser-cookie
-        # reads. We deliberately do NOT pin "auto" here (it would re-probe
-        # Chrome and re-trigger the prompt) nor a single browser (it would
-        # silently skip the service that used the other one).
-        found_browsers = set(results.get("cookies_found", {}).values())
-        from_browser = found_browsers.pop() if len(found_browsers) == 1 else None
-        # Pin only a silent winner (firefox/safari). Pinning a Chromium browser
-        # would make every steady-state run re-read its Keychain-encrypted store
-        # and can re-trigger the "Always Allow" prompt, so Chrome is used for the
-        # first-run scan but never pinned.
-        if from_browser in {"chrome", "brave", "edge", "vivaldi", "opera", "arc", "chromium"}:
-            from_browser = None
+        # Keep only successful browsers, including distinct service winners;
+        # "auto" would also probe browsers that did not supply any cookies.
+        found_browsers = dict.fromkeys(
+            "firefox" if browser == "firefox-wsl" else browser
+            for browser in results.get("cookies_found", {}).values()
+        )
+        from_browser = ",".join(found_browsers) or None
         setup_wizard.write_setup_config(env.CONFIG_FILE, from_browser=from_browser)
         results["env_written"] = True
         sys.stderr.write(setup_wizard.get_setup_status_text(results) + "\n")
