@@ -643,7 +643,7 @@ class TestBirdRetryQueryCorrectness(unittest.TestCase):
 
         self.assertGreaterEqual(len(queries), 2)
         self.assertEqual(
-            "immobilienmakler berlin mixed-use since:2026-07-12",
+            "immobilienmakler berlin mixed-use since:2026-07-12 until:2026-07-20",
             queries[0],
         )
         for query in queries:

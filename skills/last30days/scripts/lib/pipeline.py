@@ -4011,10 +4011,14 @@ def _run_supplemental_searches(
     elif primary == "bird":
         def _from_lane(hs: list, count: int, and_topic: bool = False) -> tuple[list, bool]:
             # bird_x.search_handles doesn't support and_topic yet
-            return bird_x.search_handles(hs, topic, from_date, count_per=count), False
+            return bird_x.search_handles(
+                hs, topic, from_date, count_per=count, to_date=to_date,
+            ), False
 
         def _about_lane(hs: list, count: int) -> tuple[list, bool]:
-            return bird_x.search_mentions(hs, from_date, count_per=count), False
+            return bird_x.search_mentions(
+                hs, from_date, count_per=count, to_date=to_date,
+            ), False
     elif primary == "xapi":
         # Direct X API v2 with the app-only bearer: from:/@ lanes run over
         # search/all with the recent-search fallback. One budget shared by
