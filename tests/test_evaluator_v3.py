@@ -18,15 +18,22 @@ class EvaluatorV3Tests(unittest.TestCase):
                 output_dir = Path(tmp)
                 topics = output_dir / "topics.json"
                 topics.write_text(json.dumps([{"topic": "test topic", "query_type": "general"}]))
+                baseline_url = "https://example.com/baseline-only"
+                shared_url = "https://example.com/shared"
                 old_url = "https://example.com/old"
                 new_url = "https://example.com/new" if changed_id else old_url
-                old_report = {"reddit": [{"url": old_url, "title": "Relevant result", "score": 90}]}
+                shared_item = {"url": shared_url, "title": "Shared relevant result", "score": 80}
+                baseline_report = {"reddit": [
+                    {"url": baseline_url, "title": "Unrelated baseline result", "score": 90},
+                    shared_item,
+                ]}
+                old_report = {"reddit": [shared_item, {"url": old_url, "title": "Relevant result", "score": 90}]}
                 new_title = "New relevant result" if changed_id else "Off-topic replacement"
-                new_report = {"reddit": [{"url": new_url, "title": new_title, "score": 90}]}
+                new_report = {"reddit": [shared_item, {"url": new_url, "title": new_title, "score": 90}]}
                 new_grade = 3 if changed_id else 0
                 responses = [
                     mock.Mock(returncode=0, stdout=json.dumps(report), stderr="")
-                    for report in (old_report, old_report, new_report, new_report, new_report, new_report)
+                    for report in (baseline_report, old_report, baseline_report, new_report, baseline_report, new_report)
                 ]
                 argv = [
                     "evaluate_search_quality.py", "--baseline=WORKTREE", "--candidate=WORKTREE",
@@ -37,18 +44,23 @@ class EvaluatorV3Tests(unittest.TestCase):
                     mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "dummy-evaluation-key"}),
                     mock.patch.object(evaluator.subprocess, "run", autospec=True, side_effect=responses),
                     mock.patch.object(evaluator, "call_gemini_judge", autospec=True, side_effect=[
-                        {"judgments": [{"id": old_url, "grade": 3}]},
-                        {"judgments": [{"id": new_url, "grade": new_grade}]},
+                        {"judgments": [{"id": baseline_url, "grade": 0}, {"id": shared_url, "grade": 3}, {"id": old_url, "grade": 3}]},
+                        {"judgments": [{"id": baseline_url, "grade": 0}, {"id": shared_url, "grade": 3}, {"id": new_url, "grade": new_grade}]},
                     ]) as judge,
                     contextlib.redirect_stdout(io.StringIO()),
                 ):
                     self.assertEqual(0, evaluator.main())
                     first = json.loads((output_dir / "metrics.json").read_text())
+                    self.assertEqual(0.5, first["topics"][0]["baseline"]["precision_at_5"])
                     self.assertEqual(1.0, first["topics"][0]["candidate"]["precision_at_5"])
                     self.assertEqual(0, evaluator.main())
                     second = json.loads((output_dir / "metrics.json").read_text())
-                    self.assertEqual(float(new_grade >= 2), second["topics"][0]["candidate"]["precision_at_5"])
+                    self.assertEqual(0.5, second["topics"][0]["baseline"]["precision_at_5"])
+                    self.assertEqual((1 + (new_grade >= 2)) / 2, second["topics"][0]["candidate"]["precision_at_5"])
                     self.assertEqual(2, judge.call_count)
+                    for call, result_url in zip(judge.call_args_list, (old_url, new_url)):
+                        judged_ids = [line.removeprefix("- id: ") for line in call.args[2].splitlines() if line.startswith("- id: ")]
+                        self.assertCountEqual([baseline_url, shared_url, result_url], judged_ids)
                     self.assertEqual(0, evaluator.main())
                     third = json.loads((output_dir / "metrics.json").read_text())
                     self.assertEqual(second["topics"], third["topics"])
