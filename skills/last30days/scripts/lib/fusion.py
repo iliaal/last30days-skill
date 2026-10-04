@@ -197,7 +197,8 @@ _MAX_ITEMS_PER_FIRST_PARTY_AUTHOR = 8
 def _extract_author(candidate: schema.Candidate) -> str | None:
     """Return a normalized author key from a candidate's source items."""
     for item in candidate.source_items:
-        if item.author:
+        # Jobs use the ATS provider as author, not an individual contributor.
+        if item.source != "jobs" and item.author:
             return item.author.strip().lower()
     return None
 

@@ -2301,11 +2301,34 @@ def _render_hiring_signals(
         return []
     mode = summary.get("mode") or "standard"
     if candidates is not None:
-        job_items: dict[str, schema.SourceItem] = {}
-        for candidate in candidates:
+        solid_clusters = _clusters_clearing_relevance_floor(report, report.clusters)
+        accepted = _candidates_for_auxiliary_sections(
+            report, report.clusters, solid_clusters,
+        )
+        accepted_ids = {
+            candidate.candidate_id for candidate in accepted
+            if _best_take_relevance_ok(candidate)
+        }
+        rejected_jobs = {
+            item.url or item.item_id
+            for candidate in report.ranked_candidates
+            if candidate.candidate_id not in accepted_ids
+            for item in candidate.source_items
+            if item.source == "jobs"
+        }
+        # Board size and rare-role signals must survive the ranking pool and
+        # display limits, while explicitly rejected evidence stays excluded.
+        job_items = {
+            item.url or item.item_id: item
+            for item in report.items_by_source.get("jobs", [])
+            if (item.url or item.item_id) not in rejected_jobs
+        }
+        for candidate in accepted:
+            if candidate.candidate_id not in accepted_ids:
+                continue
             for item in candidate.source_items:
                 if item.source == "jobs":
-                    job_items[item.item_id] = item
+                    job_items[item.url or item.item_id] = item
         if not job_items:
             return []
         summary = hiring_signals.analyze(
