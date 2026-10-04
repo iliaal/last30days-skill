@@ -29,10 +29,9 @@ const CacheEnvOverride = "LAST30DAYS_CACHE_DIR"
 // directory is reused without rewriting. version must be non-empty so the
 // cache layout always namespaces by version.
 //
-// Extraction writes to a sibling .tmp directory and renames it on success
-// so a partial extraction can never be mistaken for a complete one. Concurrent
-// callers within the same process serialize behind a per-cache-dir sync.Once
-// so the rename happens exactly once.
+// Extraction writes to a unique sibling directory and publishes it under a
+// filesystem lock so another process cannot remove a completed cache. Concurrent
+// callers within the same process serialize behind a per-cache-dir sync.Once.
 func Ensure(src fs.FS, baseDir, version string) (string, error) {
 	if version == "" {
 		return "", errors.New("engine: version is required")
@@ -72,28 +71,39 @@ func ensureLocked(src fs.FS, cacheDir, version string) error {
 	if sentinelMatches(cacheDir, version) {
 		return nil
 	}
-	tmpDir := cacheDir + ".tmp"
-	if err := os.RemoveAll(tmpDir); err != nil {
-		return fmt.Errorf("engine: clean tmp cache: %w", err)
+	parent := filepath.Dir(cacheDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("engine: create cache parent (%s, set %s to override): %w", parent, CacheEnvOverride, err)
 	}
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return fmt.Errorf("engine: create tmp cache (%s, set %s to override): %w", tmpDir, CacheEnvOverride, err)
+	tmpDir, err := os.MkdirTemp(parent, filepath.Base(cacheDir)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("engine: create tmp cache (set %s to override): %w", CacheEnvOverride, err)
 	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 	if err := extractAll(src, tmpDir); err != nil {
-		_ = os.RemoveAll(tmpDir)
 		return err
 	}
 	sentinel := filepath.Join(tmpDir, SentinelFilename)
 	if err := os.WriteFile(sentinel, []byte(version), 0o644); err != nil {
-		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("engine: write sentinel: %w", err)
 	}
+	lock, err := os.OpenFile(cacheDir+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("engine: open cache lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := lockCacheFile(lock); err != nil {
+		return fmt.Errorf("engine: lock cache publication: %w", err)
+	}
+	// Keep the lock file in place: unlinking it can give concurrent publishers
+	// different lock inodes. Closing the descriptor releases the lock.
+	if sentinelMatches(cacheDir, version) {
+		return nil
+	}
 	if err := os.RemoveAll(cacheDir); err != nil {
-		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("engine: clean old cache: %w", err)
 	}
 	if err := os.Rename(tmpDir, cacheDir); err != nil {
-		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("engine: promote tmp cache: %w", err)
 	}
 	return nil
