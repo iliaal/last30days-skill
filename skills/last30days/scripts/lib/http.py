@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, quote
 
-from . import health
+from . import health, usage
 from . import log as _log
 
 DEFAULT_TIMEOUT = 30
@@ -909,7 +909,13 @@ def request(
                 break
             request_timeout = min(timeout, remaining)
         try:
+            charge = usage.begin_http(url, method)
             response_status, body, response_error = open_and_read_before_deadline(request_timeout)
+            if body:
+                try:
+                    usage.finish(charge, json.loads(body))
+                except (ValueError, TypeError):
+                    pass
             if (
                 deadline_monotonic is not None
                 and time.monotonic() >= deadline_monotonic

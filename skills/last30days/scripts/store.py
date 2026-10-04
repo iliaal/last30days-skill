@@ -179,6 +179,7 @@ _UPDATABLE_RUN_COLUMNS = frozenset({
     "prompt_tokens",
     "completion_tokens",
     "token_cost",
+    "cost_unknown",
     "duration_seconds",
     "status",
     "error_message",
@@ -242,6 +243,10 @@ CREATE TABLE IF NOT EXISTS discovery_topics (
 CREATE INDEX IF NOT EXISTS idx_discovery_topics_status_surfaced
     ON discovery_topics(status, last_surfaced);
 """,
+    4: """
+ALTER TABLE research_runs ADD COLUMN cost_unknown INTEGER NOT NULL DEFAULT 1;
+UPDATE research_runs SET cost_unknown = 0 WHERE token_cost > 0;
+""",
 }
 
 
@@ -279,16 +284,28 @@ def init_db(db_path: Optional[Path] = None) -> Path:
 
 def _run_migrations(conn: sqlite3.Connection):
     """Apply pending schema migrations."""
-    current = conn.execute(
-        "SELECT MAX(version) FROM schema_version"
-    ).fetchone()[0] or 0
-
-    for version in sorted(MIGRATIONS.keys()):
-        if version > current:
-            conn.executescript(MIGRATIONS[version])
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?)", (version,)
-            )
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()[0] or 0
+        for version in sorted(MIGRATIONS):
+            if version <= current:
+                continue
+            # executescript commits before running; keep DDL and its marker atomic.
+            statement = ""
+            for character in MIGRATIONS[version]:
+                statement += character
+                if character == ";" and sqlite3.complete_statement(statement):
+                    conn.execute(statement)
+                    statement = ""
+            if statement.strip():
+                conn.execute(statement)
+            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 # --- Topics ---
@@ -386,7 +403,7 @@ def record_run(
     duration_seconds: float = 0,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
-    token_cost: float = 0,
+    token_cost: Optional[float] = None,
 ) -> int:
     """Record a research run. Returns the run ID."""
     conn = _connect()
@@ -394,11 +411,12 @@ def record_run(
         cursor = conn.execute(
             """INSERT INTO research_runs
                (topic_id, run_date, source_mode, status, error_message,
-                duration_seconds, prompt_tokens, completion_tokens, token_cost)
-               VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?)""",
+                duration_seconds, prompt_tokens, completion_tokens, token_cost, cost_unknown)
+               VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 topic_id, source_mode, status, error_message,
                 duration_seconds, prompt_tokens, completion_tokens, token_cost,
+                int(token_cost is None),
             ),
         )
         conn.commit()
@@ -1024,6 +1042,18 @@ def get_daily_cost(date: Optional[str] = None) -> float:
 
 
 # --- Settings ---
+
+
+def get_daily_unknown_cost_runs(date: Optional[str] = None) -> int:
+    conn = _connect()
+    try:
+        date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return conn.execute(
+            "SELECT COUNT(*) FROM research_runs WHERE date(run_date) = date(?) AND cost_unknown = 1",
+            (date,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
 
 
 def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
