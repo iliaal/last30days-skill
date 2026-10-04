@@ -1,0 +1,1 @@
+Prevented private corpus titles from appearing in published library briefs, indexes, and feeds. Daily briefing archives now retain headline provenance; older archives recover public headlines from their stored findings or use a generic headline when provenance is unavailable. Original titles remain available locally.

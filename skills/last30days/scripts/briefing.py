@@ -121,6 +121,8 @@ def generate_daily(since: str = None) -> dict:
         "total_topics": len(briefing_topics),
         "top_finding": {
             "title": top_overall.get("source_title", ""),
+            "source": top_overall.get("source", ""),
+            "source_url": top_overall.get("source_url", ""),
             "topic": top_overall.get("_topic", ""),
             "engagement": top_overall.get("engagement_score", 0),
         } if top_overall else None,
