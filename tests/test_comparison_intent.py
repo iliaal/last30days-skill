@@ -14,6 +14,8 @@ SINGLE_TOPICS = [
     "https://example.com",
     "https://example.com/React/Vue",
     "https://example.com/vs/topic",
+    "https://example.com/vs.Vue",
+    "React vsVue",
     "compare CI/CD workflows",
 ]
 
@@ -21,11 +23,14 @@ COMPARISONS = [
     ("React/Vue/Svelte", ["React", "Vue", "Svelte"]),
     ("React vs Vue", ["React", "Vue"]),
     ("React vs. Vue", ["React", "Vue"]),
+    ("React vs.Vue", ["React", "Vue"]),
+    ("React VS.Vue", ["React", "Vue"]),
     ("React versus Vue", ["React", "Vue"]),
     ("React compared to Vue", ["React", "Vue"]),
     ("difference between React and Vue", ["React", "Vue"]),
     ("React/Vue/Svelte for CI/CD", ["React", "Vue", "Svelte"]),
     ("CI/CD vs I/O", ["CI/CD", "I/O"]),
+    ("CI/CD vs.I/O", ["CI/CD", "I/O"]),
     ("openai/openai-python vs anthropics/anthropic-sdk-python",
      ["openai/openai-python", "anthropics/anthropic-sdk-python"]),
 ]

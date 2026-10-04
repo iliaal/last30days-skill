@@ -916,7 +916,7 @@ def _comparison_entities(topic: str, *, uncapped: bool = False) -> list[str]:
         flags=re.I,
     )
     normalized = re.sub(r"\b(compared to)\b", " vs ", normalized, flags=re.I)
-    separator = r"(?<!\S)(?:vs\.?|versus)(?!\S)"
+    separator = r"(?<!\S)(?:vs\.|(?:vs|versus)(?!\S))"
     if not re.search(separator, normalized, flags=re.I):
         if re.search(r"https?://", normalized):
             return []
