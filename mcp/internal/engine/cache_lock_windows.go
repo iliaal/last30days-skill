@@ -8,12 +8,17 @@ import (
 
 var lockFileEx = syscall.NewLazyDLL("kernel32.dll").NewProc("LockFileEx")
 
-func lockCacheFile(file *os.File) error {
+func tryLockCacheFile(file *os.File) (bool, error) {
 	const exclusiveLock = 0x00000002
+	const failImmediately = 0x00000001
+	const lockViolation = syscall.Errno(33)
 	var overlapped syscall.Overlapped
-	result, _, err := lockFileEx.Call(file.Fd(), exclusiveLock, 0, 1, 0, uintptr(unsafe.Pointer(&overlapped)))
+	result, _, err := lockFileEx.Call(file.Fd(), exclusiveLock|failImmediately, 0, 1, 0, uintptr(unsafe.Pointer(&overlapped)))
 	if result == 0 {
-		return err
+		if err == lockViolation {
+			return false, nil
+		}
+		return false, err
 	}
-	return nil
+	return true, nil
 }

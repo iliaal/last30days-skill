@@ -8,6 +8,6 @@ import (
 	"runtime"
 )
 
-func lockCacheFile(file *os.File) error {
-	return fmt.Errorf("cache locking is unsupported on %s", runtime.GOOS)
+func tryLockCacheFile(file *os.File) (bool, error) {
+	return false, fmt.Errorf("cache locking is unsupported on %s", runtime.GOOS)
 }
