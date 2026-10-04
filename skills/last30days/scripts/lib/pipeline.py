@@ -3852,6 +3852,10 @@ def _run_supplemental_searches(
     resolved_handles_out: list[str] | None = None,
 ) -> None:
     """Phase 2: extract entities from Phase 1 results, run targeted supplemental searches."""
+    # The sanitized plan already intersects requested, available, and excluded
+    # sources. A handle or host envelope must not expand that source boundary.
+    if not any("x" in subquery.sources for subquery in plan.subqueries):
+        return
     from_date, to_date = date_range
 
     # Host-fetched X lane: the envelope's lane calls replace the backend
