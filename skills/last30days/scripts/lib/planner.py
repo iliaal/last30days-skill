@@ -923,11 +923,18 @@ def _comparison_entities(topic: str, *, uncapped: bool = False) -> list[str]:
         normalized = _SLASH_COMPARISON.sub(
             lambda match: match.group(0).replace("/", " vs "), normalized,
         )
-    parts = [
-        part.strip(" \t\r\n?.,:;!()[]{}\"'")
-        for part in re.split(separator, normalized, flags=re.I)
-        if part.strip(" \t\r\n?.,:;!()[]{}\"'")
-    ]
+    trim = " \t\r\n?.,:;!()[]{}\"'"
+    parts = []
+    part_start = 0
+    for match in re.finditer(separator, normalized, flags=re.I):
+        part = normalized[part_start:match.start()].strip(trim)
+        if not part:
+            continue
+        parts.append(part)
+        part_start = match.end()
+    last_part = normalized[part_start:].strip(trim)
+    if last_part:
+        parts.append(last_part)
     # Strip trailing context from parts ("Svelte for frontend in 2026" -> "Svelte")
     if len(parts) < 2:
         return []
