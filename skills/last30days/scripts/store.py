@@ -294,6 +294,17 @@ def _run_migrations(conn: sqlite3.Connection):
 # --- Topics ---
 
 
+# Aggregate references retain the known memberships of pre-ledger databases.
+_FINDING_TOPICS_SQL = """
+SELECT id AS finding_id, topic_id FROM findings WHERE topic_id IS NOT NULL
+UNION
+SELECT finding_id, topic_id FROM finding_sightings WHERE topic_id IS NOT NULL
+UNION
+SELECT f.id, r.topic_id FROM findings f
+JOIN research_runs r ON r.id = f.run_id WHERE r.topic_id IS NOT NULL
+"""
+
+
 def add_topic(
     name: str,
     search_queries: Optional[List[str]] = None,
@@ -327,14 +338,44 @@ def remove_topic(name: str) -> bool:
     init_db()
     conn = _connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT id FROM topics WHERE name = ?", (name,)
         ).fetchone()
         if not row:
             return False
         topic_id = row["id"]
-        # Delete findings and runs for this topic
-        conn.execute("DELETE FROM findings WHERE topic_id = ?", (topic_id,))
+        findings = conn.execute(
+            f"""WITH memberships AS ({_FINDING_TOPICS_SQL})
+                SELECT f.id, f.topic_id, f.run_id, r.topic_id AS run_topic_id,
+                       (SELECT MIN(m.topic_id) FROM memberships m
+                        WHERE m.finding_id = f.id AND m.topic_id != ?) AS survivor
+                FROM findings f
+                LEFT JOIN research_runs r ON r.id = f.run_id
+                WHERE f.id IN (SELECT finding_id FROM memberships WHERE topic_id = ?)""",
+            (topic_id, topic_id),
+        ).fetchall()
+        for finding in findings:
+            if finding["survivor"] is None:
+                conn.execute("DELETE FROM findings WHERE id = ?", (finding["id"],))
+                continue
+            owner_id = finding["topic_id"]
+            if owner_id == topic_id:
+                owner_id = finding["survivor"]
+            run_id = finding["run_id"]
+            if finding["run_topic_id"] == topic_id:
+                surviving_run = conn.execute(
+                    """SELECT s.run_id FROM finding_sightings s
+                       JOIN research_runs r ON r.id = s.run_id
+                       WHERE s.finding_id = ? AND s.topic_id != ? AND r.topic_id != ?
+                       ORDER BY s.seen_at DESC, s.id DESC LIMIT 1""",
+                    (finding["id"], topic_id, topic_id),
+                ).fetchone()
+                run_id = surviving_run["run_id"] if surviving_run else None
+            conn.execute(
+                "UPDATE findings SET topic_id = ?, run_id = ? WHERE id = ?",
+                (owner_id, run_id, finding["id"]),
+            )
         conn.execute("DELETE FROM research_runs WHERE topic_id = ?", (topic_id,))
         conn.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
         conn.commit()
@@ -349,8 +390,9 @@ def list_topics() -> List[Dict[str, Any]]:
     conn = _connect()
     try:
         rows = conn.execute(
-            """SELECT t.*,
-                      (SELECT COUNT(*) FROM findings WHERE topic_id = t.id) as finding_count,
+            f"""WITH memberships AS ({_FINDING_TOPICS_SQL})
+               SELECT t.*,
+                      (SELECT COUNT(*) FROM memberships WHERE topic_id = t.id) as finding_count,
                       (SELECT MAX(run_date) FROM research_runs WHERE topic_id = t.id) as last_run,
                       (SELECT status FROM research_runs WHERE topic_id = t.id
                        ORDER BY created_at DESC LIMIT 1) as last_status
@@ -726,24 +768,27 @@ def _delta_source_counts(
 def get_new_findings(
     topic_id: int,
     since: Optional[str] = None,
+    before: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Get findings for a topic, optionally since a date."""
+    """Get findings for a topic within inclusive since/exclusive before dates."""
     conn = _connect()
     try:
+        date_filter = ""
+        parameters: List[Any] = [topic_id]
         if since:
-            rows = conn.execute(
-                """SELECT * FROM findings
-                   WHERE topic_id = ? AND first_seen >= ? AND dismissed = 0
-                   ORDER BY first_seen DESC""",
-                (topic_id, since),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT * FROM findings
-                   WHERE topic_id = ? AND dismissed = 0
-                   ORDER BY first_seen DESC""",
-                (topic_id,),
-            ).fetchall()
+            date_filter += " AND first_seen >= ?"
+            parameters.append(since)
+        if before:
+            date_filter += " AND first_seen < ?"
+            parameters.append(before)
+        rows = conn.execute(
+            f"""WITH memberships AS ({_FINDING_TOPICS_SQL})
+                SELECT * FROM findings
+                WHERE id IN (SELECT finding_id FROM memberships WHERE topic_id = ?)
+                  AND dismissed = 0{date_filter}
+                ORDER BY first_seen DESC""",
+            parameters,
+        ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -1115,11 +1160,13 @@ def get_trending(days: int = 7) -> List[Dict[str, Any]]:
     try:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
         rows = conn.execute(
-            """SELECT t.name, t.id,
+            f"""WITH memberships AS ({_FINDING_TOPICS_SQL})
+               SELECT t.name, t.id,
                       COUNT(f.id) as new_findings,
                       COALESCE(SUM(f.engagement_score), 0) as total_engagement
                FROM topics t
-               LEFT JOIN findings f ON f.topic_id = t.id AND f.first_seen >= ?
+               LEFT JOIN memberships m ON m.topic_id = t.id
+               LEFT JOIN findings f ON f.id = m.finding_id AND f.first_seen >= ?
                WHERE t.enabled = 1
                GROUP BY t.id
                ORDER BY new_findings DESC""",

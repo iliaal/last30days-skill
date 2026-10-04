@@ -1,0 +1,1 @@
+Fixed watchlist topic removal to preserve findings and run history shared with other topics. Topic lists, finding queries, trend counts, and weekly briefings now include shared findings without double-counting repeated sightings.

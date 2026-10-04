@@ -160,17 +160,7 @@ def generate_weekly() -> dict:
         this_week = store.get_new_findings(topic["id"], week_ago)
 
         # Last week's findings (for comparison)
-        conn = store._connect()
-        try:
-            last_week_rows = conn.execute(
-                """SELECT * FROM findings
-                   WHERE topic_id = ? AND first_seen >= ? AND first_seen < ? AND dismissed = 0
-                   ORDER BY engagement_score DESC""",
-                (topic["id"], two_weeks_ago, week_ago),
-            ).fetchall()
-            last_week = [dict(r) for r in last_week_rows]
-        finally:
-            conn.close()
+        last_week = store.get_new_findings(topic["id"], two_weeks_ago, before=week_ago)
 
         this_engagement = sum(f.get("engagement_score") or 0 for f in this_week)
         last_engagement = sum(f.get("engagement_score") or 0 for f in last_week)
