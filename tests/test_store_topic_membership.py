@@ -1,7 +1,9 @@
 """Shared findings retain every topic's membership and history."""
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 import pytest
 
@@ -65,7 +67,8 @@ def _create_legacy_findings(path):
     old = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")
     with sqlite3.connect(path) as conn:
         conn.executescript(store.SCHEMA_V1)
-        conn.executescript(store.SCHEMA_V1_DEFAULTS)
+        conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+        conn.executemany("INSERT INTO settings (key, value) VALUES (?, ?)", store._DEFAULT_SETTINGS.items())
         conn.execute("INSERT INTO topics (id, name) VALUES (1, 'A')")
         conn.execute("INSERT INTO research_runs (id, topic_id, run_date) VALUES (1, 1, ?)", (old,))
         for finding_id in (1, 2):
@@ -154,6 +157,105 @@ def test_backfill_rolls_back_historical_sightings_and_marker_on_failure(tmp_path
             assert conn.execute(
                 "SELECT value FROM settings WHERE key = '_topic_sightings_backfilled_v1'"
             ).fetchone()[0] == "1"
+
+
+def test_completed_backfill_reads_marker_without_writer_transaction(tmp_path):
+    with store.scoped_db(tmp_path / "research.db"):
+        store.init_db()
+        writer = store._connect()
+        reader = store._connect()
+        statements = []
+        reader.set_trace_callback(statements.append)
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+
+            store._backfill_owner_sightings(reader)
+
+            assert statements
+            assert not any(statement.lstrip().upper().startswith((
+                "BEGIN", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
+            )) for statement in statements)
+        finally:
+            writer.rollback()
+            writer.close()
+            reader.close()
+
+
+@pytest.mark.parametrize("read", ["list_topics", "get_topic"])
+def test_topic_reads_succeed_while_another_connection_holds_writer_lock(tmp_path, read):
+    with store.scoped_db(tmp_path / "research.db"):
+        store.add_topic("A")
+        writer = store._connect()
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+
+            if read == "list_topics":
+                assert [topic["name"] for topic in store.list_topics()] == ["A"]
+            else:
+                assert store.get_topic("A")["name"] == "A"
+
+            assert writer.in_transaction
+        finally:
+            writer.rollback()
+            writer.close()
+
+
+def test_initialization_repairs_missing_defaults_without_overwriting_settings(tmp_path):
+    path = tmp_path / "research.db"
+    with store.scoped_db(path):
+        store.init_db()
+        store.set_setting("delivery_channel", "existing-channel")
+        with sqlite3.connect(path) as conn:
+            conn.execute("DELETE FROM settings WHERE key = 'delivery_mode'")
+            conn.execute("DELETE FROM schema_version WHERE version = 1")
+
+        store.init_db()
+
+        with sqlite3.connect(path) as conn:
+            assert conn.execute(
+                "SELECT value FROM settings WHERE key = 'delivery_mode'"
+            ).fetchone()[0] == "announce"
+            assert conn.execute(
+                "SELECT value FROM settings WHERE key = 'delivery_channel'"
+            ).fetchone()[0] == "existing-channel"
+            assert conn.execute("SELECT version FROM schema_version WHERE version = 1").fetchone() == (1,)
+
+
+def test_backfill_rechecks_marker_after_waiting_for_another_initializer(tmp_path):
+    with store.scoped_db(tmp_path / "research.db"):
+        store.init_db()
+        writer = store._connect()
+        try:
+            writer.execute("DELETE FROM settings WHERE key = '_topic_sightings_backfilled_v1'")
+            writer.commit()
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute(
+                "INSERT INTO settings (key, value) VALUES ('_topic_sightings_backfilled_v1', '1')"
+            )
+            waiting_for_writer = Event()
+
+            def initialize():
+                reader = store._connect()
+                try:
+                    reader.set_trace_callback(lambda sql: (
+                        waiting_for_writer.set() if sql == "BEGIN IMMEDIATE" else None
+                    ))
+                    store._backfill_owner_sightings(reader)
+                finally:
+                    reader.close()
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(initialize)
+                try:
+                    assert waiting_for_writer.wait(timeout=2)
+                finally:
+                    writer.commit()
+                future.result(timeout=2)
+            assert writer.execute(
+                "SELECT COUNT(*) FROM settings WHERE key = '_topic_sightings_backfilled_v1'"
+            ).fetchone()[0] == 1
+        finally:
+            writer.close()
 
 
 @pytest.mark.parametrize("surface", ["findings", "trending", "daily", "weekly"])

@@ -165,14 +165,13 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
-SCHEMA_V1_DEFAULTS = """
-INSERT OR IGNORE INTO schema_version (version) VALUES (1);
-INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_budget', '5.00');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('delivery_channel', '');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('delivery_mode', 'announce');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('briefing_format', 'concise');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('default_schedule', '0 8 * * *');
-"""
+_DEFAULT_SETTINGS = {
+    "daily_budget": "5.00",
+    "delivery_channel": "",
+    "delivery_mode": "announce",
+    "briefing_format": "concise",
+    "default_schedule": "0 8 * * *",
+}
 
 _UPDATABLE_RUN_COLUMNS = frozenset({
     "source_mode",
@@ -268,7 +267,19 @@ def init_db(db_path: Optional[Path] = None) -> Path:
     conn = _connect(path)
     try:
         conn.executescript(SCHEMA_V1)
-        conn.executescript(SCHEMA_V1_DEFAULTS)
+        if not conn.execute("SELECT 1 FROM schema_version WHERE version = 1").fetchone():
+            conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (1)")
+        existing_settings = {row["key"] for row in conn.execute("SELECT key FROM settings")}
+        missing_defaults = [
+            (key, value) for key, value in _DEFAULT_SETTINGS.items()
+            if key not in existing_settings
+        ]
+        if missing_defaults:
+            conn.executemany(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                missing_defaults,
+            )
+        conn.commit()
         _run_migrations(conn)
         conn.commit()
         _backfill_owner_sightings(conn)
@@ -295,6 +306,8 @@ def _run_migrations(conn: sqlite3.Connection):
 def _backfill_owner_sightings(conn: sqlite3.Connection) -> None:
     """Preserve legacy first observations before aggregate ownership can change."""
     marker = "_topic_sightings_backfilled_v1"
+    if conn.execute("SELECT 1 FROM settings WHERE key = ?", (marker,)).fetchone():
+        return
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute("SELECT 1 FROM settings WHERE key = ?", (marker,)).fetchone():
