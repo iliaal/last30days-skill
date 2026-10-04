@@ -3340,8 +3340,16 @@ def _main(
         # first-run scan but never pinned.
         if from_browser in {"chrome", "brave", "edge", "vivaldi", "opera", "arc", "chromium"}:
             from_browser = None
-        setup_wizard.write_setup_config(env.CONFIG_FILE, from_browser=from_browser)
-        results["env_written"] = True
+        results["env_written"] = setup_wizard.write_setup_config(
+            env.CONFIG_FILE,
+            from_browser=from_browser,
+            browser_consent=(
+                None if args.diagnose else _setup_allows_browser_cookies(args, extra_argv)
+            ),
+        )
+        if not results["env_written"]:
+            sys.stderr.write("Setup could not save the browser-cookie decision; configuration was not saved.\n")
+            return 1
         sys.stderr.write(setup_wizard.get_setup_status_text(results) + "\n")
         return 0
 

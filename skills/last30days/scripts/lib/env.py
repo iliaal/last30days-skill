@@ -664,6 +664,7 @@ def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
         # automated contexts (cron/CI/eval). Read by trustpilot._harvest_allowed.
         ('LAST30DAYS_TRUSTPILOT_NO_BROWSER', None),
         ('FROM_BROWSER', None),
+        ('BROWSER_CONSENT', None),
         # agentcookie sidecar: soft-dep X cookie source (lib/agentcookie.py),
         # active only on extra hosts (Linux / Mac mini / Darwin sink) or when
         # set to "on". "off" disables the sidecar reader.
@@ -990,8 +991,8 @@ def _discover_and_apply_x_credentials(config: dict[str, Any]) -> None:
     if mini_extract_first and not have_pair():
         _apply_browser_extract(config)
 
-    # (3) live Chrome CDP — extras only, complete pair only.
-    if extras and not have_pair():
+    # (3) live Chrome CDP — extras only, after browser-cookie consent.
+    if extras and not have_pair() and chrome_cdp.cookie_access_allowed(config):
         pair = chrome_cdp.read_x_cookies(config)
         if pair:
             _apply_x_pair(config, pair["auth_token"], pair["ct0"], "chrome cdp")
@@ -1043,6 +1044,9 @@ def cookie_extraction_browsers(config: dict[str, Any]) -> list[str]:
     list is empty regardless of ``FROM_BROWSER`` unless ``bird`` is pinned.
     """
     if not x_policy(config).cookie_discovery:
+        return []
+    consent = config.get("BROWSER_CONSENT")
+    if consent is not None and str(consent).strip().lower() not in {"1", "true", "yes", "on"}:
         return []
     silent_browsers = ["firefox", "safari"]
     chromium_browsers = ["chrome", "brave", "edge", "vivaldi", "opera", "arc", "chromium"]

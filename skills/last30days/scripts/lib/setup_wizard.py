@@ -110,6 +110,7 @@ def run_auto_setup(config: Dict[str, Any], *, allow_browser_cookies: bool = Fals
         from . import cookie_extract
 
         cookie_config = dict(config)
+        cookie_config["BROWSER_CONSENT"] = "true"
         if not (cookie_config.get("FROM_BROWSER") or "").strip():
             # Chromium-first: Chrome/Brave/etc. read cookies via the Keychain
             # with no Full Disk Access, so try them before Safari, whose
@@ -585,11 +586,17 @@ def _format_env_value(value: str) -> str:
     return value
 
 
-def write_setup_config(env_path: Path, from_browser: str | None = None) -> bool:
-    """Write SETUP_COMPLETE and FROM_BROWSER to the .env file.
+def write_setup_config(
+    env_path: Path,
+    from_browser: str | None = None,
+    *,
+    browser_consent: bool | None = None,
+) -> bool:
+    """Write setup completion, browser selection, and consent to the .env file.
 
     Creates the file and parent directories if needed.
-    Appends to existing file without overwriting existing keys.
+    Appends without overwriting existing keys, except for an explicit consent
+    decision.
 
     Args:
         env_path: Path to the .env file (e.g. ~/.config/last30days/.env)
@@ -599,6 +606,8 @@ def write_setup_config(env_path: Path, from_browser: str | None = None) -> bool:
             default (Firefox/Safari, no Keychain prompt) then applies. We avoid
             persisting "auto" because it makes every later run probe Chrome and
             re-trigger the Keychain prompt.
+        browser_consent: Record the user's current cookie-access decision.
+            None preserves any previous decision.
 
     Returns:
         True if config was written successfully, False on error.
@@ -606,6 +615,12 @@ def write_setup_config(env_path: Path, from_browser: str | None = None) -> bool:
     try:
         env_path = Path(env_path)
         env_path.parent.mkdir(parents=True, exist_ok=True)
+        if browser_consent is not None:
+            if not write_api_key(
+                env_path, "true" if browser_consent else "false",
+                key_name="BROWSER_CONSENT", replace=True,
+            ):
+                return False
 
         # Read existing content to avoid overwriting keys
         existing_keys: set = set()
