@@ -5,7 +5,7 @@ import briefing
 import last30days as cli
 import pytest
 import store
-from lib import html_publish, html_render, library
+from lib import feed, html_publish, html_render, library
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["current", "legacy"])
@@ -152,3 +152,63 @@ def test_private_briefing_title_cannot_close_local_only_block(tmp_path):
     assert notes == []
     assert secret not in html_render.render_library_brief(entries[0], include_private=False)
     assert secret in html_render.render_library_brief(entries[0])
+
+
+@pytest.mark.parametrize("sources", ["public", "private", "mixed", "empty"])
+def test_weekly_archive_selects_only_public_headlines(tmp_path, monkeypatch, sources):
+    token = uuid.uuid4().hex.translate(str.maketrans("0123456789", "ghijklmnop"))
+    private_title = f"PRIVATE weekly acquisition {token}"
+    public_title = "Public weekly release announcement"
+    archive = tmp_path / "archive"
+    monkeypatch.setattr(store, "_db_override", tmp_path / "research.db")
+    monkeypatch.setattr(briefing, "BRIEFS_DIR", archive)
+    topic = store.add_topic("Weekly releases")
+    run_id = store.record_run(topic["id"], status="completed")
+    findings = []
+    if sources in {"private", "mixed"}:
+        findings.append({
+            "source": "corpus",
+            "source_url": "corpus://private-weekly-acquisition",
+            "source_title": private_title,
+            "engagement_score": 100,
+        })
+    if sources in {"public", "mixed"}:
+        findings.extend([
+            {
+                "source": "reddit",
+                "source_url": "https://example.invalid/public-weekly-discussion",
+                "source_title": "Lower-ranked public discussion",
+                "engagement_score": 5,
+            },
+            {
+                "source": "reddit",
+                "source_url": "https://example.invalid/public-weekly-release",
+                "source_title": public_title,
+                "engagement_score": 10,
+            },
+        ])
+    store.store_findings(run_id, topic["id"], findings)
+    weekly = briefing.generate_weekly()
+    assert len(weekly["topics"][0]["top_findings"]) == len(findings)
+    archived = json.loads(next(archive.glob("*-weekly.json")).read_text(encoding="utf-8"))
+    assert archived["topics"][0]["top_findings"] == weekly["topics"][0]["top_findings"]
+    if sources in {"private", "mixed"}:
+        assert private_title in json.dumps(archived)
+
+    entries, notes = library.scan_library(tmp_path / "missing", archive)
+
+    assert notes == []
+    assert len(entries) == 1
+    entry = entries[0]
+    documents = [
+        entry.headline,
+        entry.summary,
+        html_render.render_library_brief(entry, include_private=False),
+        html_render.render_library_index(entries),
+        feed.render_atom(entries, library_id="a" * 32),
+    ]
+    for document in documents:
+        assert private_title not in document
+    expected_title = public_title if sources in {"public", "mixed"} else "Weekly research briefing"
+    assert entry.headline == expected_title
+    assert all(expected_title in document for document in documents)

@@ -242,8 +242,12 @@ def _briefing_public_headline(data: dict[str, object], fallback: str) -> str:
     topics = data.get("topics")
     if isinstance(topics, list):
         for topic in topics:
-            if isinstance(topic, dict) and isinstance(topic.get("findings"), list):
-                candidates.extend(topic["findings"])
+            if not isinstance(topic, dict):
+                continue
+            for field in ("findings", "top_findings"):
+                findings = topic.get(field)
+                if isinstance(findings, list):
+                    candidates.extend(findings)
 
     public_titles = []
     for finding in candidates:
