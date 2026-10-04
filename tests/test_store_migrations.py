@@ -64,6 +64,42 @@ def test_concurrent_initialization_applies_each_version_once(version_three):
         conn.close()
 
 
+def test_current_schema_check_succeeds_while_another_connection_holds_writer(version_three):
+    store.init_db()
+    writer = store._connect()
+    reader = store._connect()
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO settings (key, value) VALUES ('held-writer', 'uncommitted')")
+        reader.execute("PRAGMA busy_timeout=1")
+
+        store._run_migrations(reader)
+
+        assert not reader.in_transaction
+        assert reader.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+        assert reader.execute("SELECT value FROM settings WHERE key = 'held-writer'").fetchone() is None
+    finally:
+        writer.rollback()
+        writer.close()
+        reader.close()
+
+
+def test_pending_migration_after_committed_default_seeding(version_three):
+    conn = store._connect()
+    try:
+        conn.execute("DELETE FROM settings WHERE key = 'daily_budget'")
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("daily_budget", "9.25"))
+        conn.commit()
+
+        store._run_migrations(conn)
+
+        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+        assert conn.execute("SELECT value FROM settings WHERE key = 'daily_budget'").fetchone()[0] == "9.25"
+        assert "cost_unknown" in {row[1] for row in conn.execute("PRAGMA table_info(research_runs)")}
+    finally:
+        conn.close()
+
+
 def test_migration_retains_trigger_body_and_quoted_semicolons(version_three, monkeypatch):
     monkeypatch.setattr(store, "MIGRATIONS", {
         **store.MIGRATIONS,

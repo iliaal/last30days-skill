@@ -284,6 +284,9 @@ def init_db(db_path: Optional[Path] = None) -> Path:
 
 def _run_migrations(conn: sqlite3.Connection):
     """Apply pending schema migrations."""
+    current = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] or 0
+    if current >= max(MIGRATIONS, default=0):
+        return
     conn.execute("BEGIN IMMEDIATE")
     try:
         current = conn.execute(
