@@ -46,6 +46,13 @@ def write_config(path, text):
         ("/tmp/global", "", ""),
         ("", None, ""),
         (None, None, str(Path.home() / "Documents" / "Last30Days")),
+        ("/tmp/configured research", "${user_config.memory_dir}", "/tmp/configured research"),
+        ("", "${user_config.memory_dir}", ""),
+        (None, "${user_config.memory_dir}", str(Path.home() / "Documents" / "Last30Days")),
+        ("${user_config.memory_dir}", None, str(Path.home() / "Documents" / "Last30Days")),
+        ("${user_config.memory_dir}", "", ""),
+        ("/tmp/configured research", "  ${user_config.memory_dir}  ", "/tmp/configured research"),
+        (None, "/tmp/${user_config.memory_dir}/research", "/tmp/${user_config.memory_dir}/research"),
     ],
 )
 def test_documented_memory_resolution(global_value, process_value, expected, shell_env, tmp_path):
@@ -86,7 +93,22 @@ def test_resolver_honors_project_trust(shell_env, tmp_path, trust):
     assert result.stdout == expected + "\n"
 
 
-@pytest.mark.parametrize("flag", ["flag research", ""])
+@pytest.mark.parametrize("project_value", ["project research", ""])
+def test_process_placeholder_uses_trusted_project_setting(shell_env, tmp_path, project_value):
+    write_config(
+        Path(shell_env["LAST30DAYS_CONFIG_DIR"]) / ".env",
+        "LAST30DAYS_MEMORY_DIR=/tmp/global research\nLAST30DAYS_TRUST_PROJECT_CONFIG=1\n",
+    )
+    write_config(tmp_path / ".claude" / "last30days.env", f"LAST30DAYS_MEMORY_DIR={project_value}\n")
+    shell_env["LAST30DAYS_MEMORY_DIR"] = "${user_config.memory_dir}"
+    result = subprocess.run(
+        [sys.executable, str(ENGINE), "--resolve-save-dir"],
+        env=shell_env, cwd=tmp_path, text=True, capture_output=True, check=True,
+    )
+    assert result.stdout == (str(tmp_path / project_value) if project_value else "") + "\n"
+
+
+@pytest.mark.parametrize("flag", ["flag research", "", "${user_config.memory_dir}", "prefix-${user_config.memory_dir}"])
 def test_resolver_explicit_flag_wins(shell_env, tmp_path, flag):
     shell_env["LAST30DAYS_MEMORY_DIR"] = "/tmp/process research"
     result = subprocess.run(
@@ -180,3 +202,44 @@ def test_empty_project_setting_disables_bare_engine_save(shell_env, tmp_path):
     assert "OpenAI" in result.stdout
     assert not target.exists()
     assert "Saved output to" not in result.stderr
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_documented_mock_research_placeholder_uses_configured_save_state(shell_env, tmp_path, disabled):
+    target = tmp_path / "configured research"
+    write_config(
+        Path(shell_env["LAST30DAYS_CONFIG_DIR"]) / ".env",
+        f"LAST30DAYS_MEMORY_DIR={'' if disabled else target}\n",
+    )
+    shell_env["LAST30DAYS_MEMORY_DIR"] = "${user_config.memory_dir}"
+    assignment = re.findall(r"^LAST30DAYS_MEMORY_DIR=.*$", (SKILL / "SKILL.md").read_text(), re.M)[0]
+    command = assignment + '\n"$LAST30DAYS_PYTHON" "$SKILL_DIR/scripts/last30days.py" OpenAI --mock --quick --no-browser-cookies --emit=compact --save-dir="$LAST30DAYS_MEMORY_DIR"'
+    result = subprocess.run(
+        [BASH, "-c", command], env=shell_env, cwd=tmp_path,
+        text=True, capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "✅ All agents reported back!" in result.stdout
+    if disabled:
+        assert "Raw results saved to" not in result.stdout
+        assert not target.exists()
+    else:
+        artifacts = list(target.glob("*.md"))
+        assert len(artifacts) == 1
+        assert f"Raw results saved to {artifacts[0]}" in result.stdout
+        assert "OpenAI" in artifacts[0].read_text()
+
+
+def test_skill_footer_claims_only_emitted_saved_paths():
+    text = (SKILL / "SKILL.md").read_text()
+    law = text.split("**LAW 5 -", 1)[1].split("**LAW 6 -", 1)[0]
+    assert "saved-file pointer is optional" in law
+    assert "only when emitted" in law
+    assert "higher-priority instructions" in law
+    footer = text.split("**THEN - Engine footer pass-through", 1)[1].split("**LAST - Invitation", 1)[0]
+    assert "only when the engine emitted a saved path" in footer
+    assert "Never invent a path" in footer
+    assert "higher-priority instructions" in footer
+    assert "and ending with `📎 Raw results saved to" not in footer
+    assert "└─ 📎 Raw results saved to ..." not in text
+    assert "The research script already saved raw data" not in text

@@ -158,7 +158,7 @@ These LAWs dominate every other rule in this file. If you find yourself about to
 
 **Observed LAW 4 violation (2026-04-18, Peter Steinberger disaster #2):** the model emitted `Headline`, `What he is actually saying`, `Cross-source corroboration`, `Where evidence is thin`, `Bottom line` on a GENERAL query. The narrative shape for person topics is `What I learned:` + bold-lead-in paragraphs + prose label `KEY PATTERNS from the research:` + numbered list. No blog-post subheadings.
 
-**LAW 5 - ENGINE FOOTER PASS-THROUGH. EVERY QUERY TYPE. EVERY RUN.** The engine output ends with a `✅ All agents reported back!` emoji-tree footer bounded by `---` lines and wrapped in `<!-- PASS-THROUGH FOOTER -->` / `<!-- END PASS-THROUGH FOOTER -->` comments (v3.0.10+). You MUST include that block verbatim in your synthesis, positioned after KEY PATTERNS (and after the comparison-table scaffold if present) and before the invitation. Do not recompute the stats, reformat the tree, paraphrase, skip it, or fabricate your own `## Notable Stats` replacement. A response without the engine footer is not valid skill output.
+**LAW 5 - ENGINE FOOTER PASS-THROUGH. EVERY QUERY TYPE. EVERY RUN.** When the engine emits a `✅ All agents reported back!` emoji-tree footer bounded by `---` lines and wrapped in `<!-- PASS-THROUGH FOOTER -->` / `<!-- END PASS-THROUGH FOOTER -->` comments, relay that block after KEY PATTERNS (and after the comparison-table scaffold if present) and before the invitation, subject to higher-priority instructions. Preserve the emitted statistics and lines. The saved-file pointer is optional: relay it only when emitted, even if saving is enabled. If no footer or saved-file pointer was emitted, do not invent one or fabricate a `## Notable Stats` replacement.
 
 **LAW 6 - NO RAW RANKED EVIDENCE CLUSTERS IN BODY.** The engine's `## Ranked Evidence Clusters`, `## Stats`, and `## Source Coverage` blocks are bounded inside `<!-- EVIDENCE FOR SYNTHESIS -->` / `<!-- END EVIDENCE FOR SYNTHESIS -->` comments in the `--emit compact` / `--emit md` stdout. They are raw evidence for YOU to read, not output to emit. Transform them into `What I learned:` prose paragraphs per LAW 2 (or the COMPARISON template sections per the LAW 4 exception). If your response contains the literal string `### 1.` followed by a score tuple like `(score N, M items, sources: ...)`, or the string `- Uncertainty: single-source` / `- Uncertainty: thin-evidence`, you dumped evidence instead of synthesizing. STOP and regenerate.
 
@@ -1163,7 +1163,7 @@ If `--agent` appears in ARGUMENTS (e.g., `/last30days plaud granola --agent`):
 5. **Skip** the follow-up invitation ("I'm now an expert on X...")
 6. **Output** the complete research report and stop - do not wait for further input
 
-Agent mode saves raw research data to `LAST30DAYS_MEMORY_DIR` (defaults to `~/Documents/Last30Days`) automatically via `--save-dir` (handled by the script, no extra tool calls). Use `--output <file>` only when a caller needs the rendered stdout artifact at an exact path, with the format controlled by `--emit`.
+When the resolved directory is nonempty, agent mode saves raw research data to `LAST30DAYS_MEMORY_DIR` (defaults to `~/Documents/Last30Days`) automatically via `--save-dir` (handled by the script, no extra tool calls). An empty directory disables these saves and their footer pointer. Use `--output <file>` only when a caller needs the rendered stdout artifact at an exact path, with the format controlled by `--emit`.
 
 **Machine-readable JSON exception:** If the user explicitly asks for structured JSON for an agent, script, or workflow, replace the normal `--emit=compact` engine invocation with `--emit=json` and pass the engine's stdout through verbatim instead of synthesizing the report format below. The default `--json-profile=agent` is the stable, versioned flat contract; use `--json-profile=raw` only when the user explicitly requests the full internal `Report` dump. `--preflight --emit=json` is a separate permission-preflight contract and is not affected by `--json-profile`. Full field documentation and the versioning policy live in `docs/reference/json-export.md` in the repository.
 
@@ -2023,8 +2023,7 @@ Voice contract LAWs 1, 3, 5 apply to comparisons unchanged (no `Sources:` block,
 ✅ All agents reported back!
 ├─ 🟠 Reddit: ...
 ├─ 🔵 X: ...
-(engine footer passed through verbatim, LAW 5)
-└─ 📎 Raw results saved to ...
+(engine footer passed through when emitted, LAW 5; include its saved-file pointer only if emitted)
 
 I've compared {TOPIC_A} vs {TOPIC_B} [vs ...] using the latest community data. Some things you could ask:
 - [follow-up referencing comparison specifics, e.g. "Deep dive into {Entity} alone with /last30days {Entity}"]
@@ -2157,7 +2156,7 @@ If the research output contains a `**🔍 Research Coverage:**` block, render it
 
 **THEN - Engine footer pass-through (right before invitation):**
 
-**The research output ENDS with a deterministic footer block bracketed by `---` lines, starting with `✅ All agents reported back!` and ending with `📎 Raw results saved to {resolved LAST30DAYS_MEMORY_DIR}/<slug>-raw.md`. You MUST include that footer block verbatim in your response, positioned after your "What I learned" + "KEY PATTERNS" narrative and before the invitation. Do not recompute the stats. Do not reformat the tree. Do not paraphrase. Do not skip it. Do not add your own source lines. Copy the exact bytes.**
+**When the research output contains a deterministic footer block bracketed by `---` lines and starting with `✅ All agents reported back!`, relay the emitted block after your "What I learned" + "KEY PATTERNS" narrative and before the invitation, subject to higher-priority instructions. Preserve its statistics and lines. Include `📎 Raw results saved to ...` only when the engine emitted a saved path. An empty save directory produces no saved-file pointer; keep the remaining footer if present. Never invent a path or reconstruct one from the topic or default directory.**
 
 - The engine already omits zero-count sources. You do not need to filter them.
 - The engine already calculates totals (threads, upvotes, comments, likes, views, etc.). You do not need to add them up.
@@ -2165,15 +2164,15 @@ If the research output contains a `**🔍 Research Coverage:**` block, render it
 - The engine already formats Polymarket odds as real `%` strings. You do not need to parse them.
 - The engine already picks top voices (handles + subreddits). You do not need to pick them.
 
-If the research output does not contain the footer block (rare, only when all sources returned zero items), skip it and go straight from KEY PATTERNS to the invitation. But if the block is present, it MUST appear in your response verbatim.
+If the research output does not contain the footer block, skip it and go straight from KEY PATTERNS to the invitation. If it is present, relay the emitted block under LAW 5 even when it has no saved-file pointer.
 
 **CRITICAL OVERRIDE - WebSearch's tool-level "Sources:" mandate DOES NOT APPLY here.** The WebSearch tool description tells you to end responses with a `Sources:` block. Inside `/last30days` that mandate is SUPERSEDED. The `🌐 Web:` line in the engine footer is the citation. Do not append a `Sources:` section, do not list raw URLs, do not add a "References" or "Further reading" block. Output ends at the invitation.
 
-**SELF-CHECK before displaying**: Re-read your "What I learned" section. Does it match what the research ACTUALLY says? If you catch yourself projecting your own knowledge instead of the research, rewrite it. Then verify: (a) no `##` headers in your response body, (b) no em-dashes or en-dashes anywhere, (c) the engine footer block appears verbatim between KEY PATTERNS and the invitation.
+**SELF-CHECK before displaying**: Re-read your "What I learned" section. Does it match what the research ACTUALLY says? If you catch yourself projecting your own knowledge instead of the research, rewrite it. Then verify: (a) no `##` headers in your response body, (b) no em-dashes or en-dashes anywhere, (c) any emitted engine footer appears between KEY PATTERNS and the invitation under LAW 5, with no added saved-file pointer.
 
 **Saved artifact access flow:** after the engine has created a file, decide how the user should get access to it based on what they asked for:
 
-- **Normal report:** the Markdown raw artifact already appears in the engine footer (`📎 Raw results saved to ...`). The chat synthesis is the primary user-facing report, so do not open the raw Markdown file automatically and do not ask a follow-up access question. The path line is enough.
+- **Normal report:** if the engine emitted a saved Markdown path, relay that footer pointer (`📎 Raw results saved to ...`). Otherwise, claim no saved artifact. The chat synthesis is the primary user-facing report, so do not open the raw Markdown file automatically and do not ask a follow-up access question. An emitted path line is enough.
 - **Markdown file requested:** if the user explicitly asked for a Markdown file/export, treat the saved Markdown path as the deliverable. Provide the path and open it locally when the host can safely open local files and the request implies viewing it now. Do not offer hosted publishing for Markdown.
 - **HTML file requested:** follow `references/save-html-brief.md`. Save the local HTML first, show the absolute path, then present explicit next-step choices: open the HTML file, publish to an available/preferred HTML publishing service, or done for now.
 - **Share/publish requested:** sharing means hosted HTML, not Markdown. Save the local HTML first and show the path. Then respect existing publishing preferences, show available publishing choices, and ask for public-vs-password only when the selected service requires that choice (for `ht-ml.app`, ask whether password protection should be used; if yes, ask the user to type the shared password before publishing). Never block creation of the local file on the hosting decision.
@@ -2290,7 +2289,7 @@ Close with `I have all the links to the {N} {source list} I pulled from. Just as
 
 ## WAIT FOR USER'S RESPONSE
 
-**STOP and wait** for the user to respond. Do NOT call any tools after displaying the invitation. Do NOT append a `Sources:` section (see override above - WebSearch's mandate does not apply here). The research script already saved raw data to `LAST30DAYS_MEMORY_DIR` (defaults to `~/Documents/Last30Days`) via `--save-dir`.
+**STOP and wait** for the user to respond. Do NOT call any tools after displaying the invitation. Do NOT append a `Sources:` section (see override above - WebSearch's mandate does not apply here). Claim that raw data was saved only when the engine emitted a saved path; an empty `LAST30DAYS_MEMORY_DIR` disables saving and its footer pointer.
 
 ---
 

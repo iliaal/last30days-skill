@@ -499,6 +499,8 @@ def resolve_memory_dir(save_dir: str | None = None) -> str:
     value = save_dir
     if value is None:
         value = os.environ.get("LAST30DAYS_MEMORY_DIR")
+        if is_unsubstituted_template(value):
+            value = None
     if value is None:
         file_env = load_env_file(CONFIG_FILE) if CONFIG_FILE else {}
         if _project_config_trusted(ConfigLoadPolicy(), file_env):
@@ -506,6 +508,8 @@ def resolve_memory_dir(save_dir: str | None = None) -> str:
             if project_path:
                 file_env.update(load_env_file(project_path))
         value = file_env.get("LAST30DAYS_MEMORY_DIR")
+        if is_unsubstituted_template(value):
+            value = None
     if value is None:
         value = str(Path.home() / "Documents" / "Last30Days")
     return str(Path(value).expanduser().absolute()) if value else ""
