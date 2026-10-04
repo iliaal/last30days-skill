@@ -1,0 +1,1 @@
+Bound MCP output-pipe draining after engine shutdown so detached helpers cannot delay timeout responses indefinitely. A timed-out engine now reports an error even when its signal handler exits successfully.

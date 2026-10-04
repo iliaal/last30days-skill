@@ -41,6 +41,10 @@ const TimeoutEnvOverride = "LAST30DAYS_MCP_TIMEOUT"
 // descendant groups before the SIGKILL backstop fires.
 const termGracePeriod = 2 * time.Second
 
+// pipeGracePeriod bounds output draining after the engine exits even if
+// an unregistered detached descendant still holds its output pipes.
+const pipeGracePeriod = time.Second
+
 // PythonEnvOverride lets operators select the Python 3.12+ executable used
 // by the MCP server. When unset, Run preserves the python3 PATH lookup.
 const PythonEnvOverride = "LAST30DAYS_PYTHON"
@@ -95,6 +99,7 @@ func Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
 	args := append([]string{scriptPath}, opts.Args...)
 	cmd := exec.Command(pythonPath, args...)
 	cmd.Env = buildEnv(opts.CacheDir, opts.ExtraEnv)
+	cmd.WaitDelay = pipeGracePeriod
 	// Own process group so a timeout SIGTERM reaches same-group
 	// grandchildren (grok CLI). exec.CommandContext would SIGKILL only the
 	// direct python child while its SIGTERM-handler/atexit cleanup never
@@ -127,6 +132,7 @@ func Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
 		termProcessGroup(cmd)
 		select {
 		case err = <-waitCh:
+			killProcessGroup(cmd)
 		case <-time.After(termGracePeriod):
 			killProcessGroup(cmd)
 			err = <-waitCh
@@ -141,19 +147,21 @@ func Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
 		ExitCode: 0,
 		TimedOut: errors.Is(subCtx.Err(), context.DeadlineExceeded),
 	}
+	if cmd.ProcessState != nil {
+		res.ExitCode = cmd.ProcessState.ExitCode()
+	}
+	if res.TimedOut {
+		return res, fmt.Errorf("engine: subprocess exceeded %s timeout", timeout)
+	}
 	if err == nil {
 		return res, nil
 	}
 
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		res.ExitCode = exitErr.ExitCode()
-		if res.TimedOut {
-			return res, fmt.Errorf("engine: subprocess exceeded %s timeout", timeout)
-		}
 		return res, fmt.Errorf("engine: subprocess exited with code %d", res.ExitCode)
 	}
-	return res, fmt.Errorf("engine: subprocess failed to start: %w", err)
+	return res, fmt.Errorf("engine: subprocess failed: %w", err)
 }
 
 // resolvePython returns a resolved interpreter path or a clear error. A

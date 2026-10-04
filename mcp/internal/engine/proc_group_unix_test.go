@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +15,104 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRunTimeoutBoundsInheritedPipes(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"signal-exit", "clean-exit", "clean-exit-without-child", "term-ignoring-in-group"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			pidFile := filepath.Join(dir, "detached.pid")
+			stub := filepath.Join(dir, "python3-detached-stub.sh")
+			if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec \"$CR012_TEST_BINARY\" -test.run='^TestRunDetachedPipeHelper$'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if raw, err := os.ReadFile(pidFile); err == nil {
+					if pid, err := strconv.Atoi(string(raw)); err == nil && pid > 0 {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+			})
+
+			started := time.Now()
+			res, err := Run(context.Background(), RunOptions{
+				PythonPath: stub,
+				CacheDir:   stageCache(t),
+				Timeout:    200 * time.Millisecond,
+				ExtraEnv: []string{
+					"CR012_TEST_BINARY=" + executable,
+					"CR012_HELPER_MODE=" + mode,
+					"CR012_PID_FILE=" + pidFile,
+				},
+			})
+			elapsed := time.Since(started)
+			if elapsed > 4*time.Second {
+				t.Errorf("Run took %s for a 200ms timeout; detached pipes must not outlive the bounded shutdown grace", elapsed)
+			}
+			if err == nil || !strings.Contains(err.Error(), "timeout") {
+				t.Errorf("Run error = %v, want timeout", err)
+			}
+			if res == nil || !res.TimedOut {
+				t.Fatalf("Run result = %+v, want TimedOut", res)
+			}
+			if mode != "clean-exit-without-child" && (!strings.Contains(string(res.Stdout), "detached stdout") || !strings.Contains(string(res.Stderr), "detached stderr")) {
+				t.Fatalf("detached process did not inherit both pipes: stdout=%q stderr=%q", res.Stdout, res.Stderr)
+			}
+			if mode == "term-ignoring-in-group" {
+				assertPidDead(t, pidFile, "TERM-ignoring in-group grandchild")
+			}
+		})
+	}
+}
+
+func TestRunDetachedPipeHelper(t *testing.T) {
+	mode := os.Getenv("CR012_HELPER_MODE")
+	if mode == "" {
+		t.Skip("subprocess fixture")
+	}
+	if mode == "pipe-holder" || mode == "pipe-holder-ignore-term" {
+		if mode == "pipe-holder-ignore-term" {
+			signal.Ignore(syscall.SIGTERM)
+		}
+		_, _ = os.Stdout.WriteString("detached stdout\n")
+		_, _ = os.Stderr.WriteString("detached stderr\n")
+		time.Sleep(8 * time.Second)
+		os.Exit(0)
+	}
+	if mode == "clean-exit" || mode == "clean-exit-without-child" {
+		terminated := make(chan os.Signal, 1)
+		signal.Notify(terminated, syscall.SIGTERM)
+		go func() {
+			<-terminated
+			os.Exit(0)
+		}()
+	}
+	if mode == "clean-exit-without-child" {
+		time.Sleep(8 * time.Second)
+		os.Exit(0)
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestRunDetachedPipeHelper$")
+	if mode == "term-ignoring-in-group" {
+		child.Env = append(os.Environ(), "CR012_HELPER_MODE=pipe-holder-ignore-term")
+	} else {
+		child.Env = append(os.Environ(), "CR012_HELPER_MODE=pipe-holder")
+		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	}
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(os.Getenv("CR012_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		_ = child.Process.Kill()
+		t.Fatal(err)
+	}
+	time.Sleep(8 * time.Second)
+	os.Exit(0)
+}
 
 // TestSetProcessGroupSetsSetpgid guards the CR-013 fix: the engine child
 // must lead its own process group so a timeout kill reaches grandchildren
