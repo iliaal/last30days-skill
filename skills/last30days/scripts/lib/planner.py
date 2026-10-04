@@ -904,6 +904,9 @@ def _comparison_entities(topic: str, *, uncapped: bool = False) -> list[str]:
 
     Caps at ``competitors.COMPARISON_ENTITY_MAX`` unless ``uncapped`` (caller
     truncates and may warn about dropped entities).
+
+    Standalone comparator tokens are syntax, including repeated tokens.
+    Compact ``vs.`` separates entities only after a nonempty left entity.
     """
     if _infer_intent(topic) != "comparison":
         return []
@@ -916,7 +919,7 @@ def _comparison_entities(topic: str, *, uncapped: bool = False) -> list[str]:
         flags=re.I,
     )
     normalized = re.sub(r"\b(compared to)\b", " vs ", normalized, flags=re.I)
-    separator = r"(?<!\S)(?:vs\.|(?:vs|versus)(?!\S))"
+    separator = r"(?<!\S)(?:(?P<standalone>vs\.?|versus)(?!\S)|vs\.(?=\S))"
     if not re.search(separator, normalized, flags=re.I):
         if re.search(r"https?://", normalized):
             return []
@@ -928,10 +931,10 @@ def _comparison_entities(topic: str, *, uncapped: bool = False) -> list[str]:
     part_start = 0
     for match in re.finditer(separator, normalized, flags=re.I):
         part = normalized[part_start:match.start()].strip(trim)
-        if not part:
-            continue
-        parts.append(part)
-        part_start = match.end()
+        if part:
+            parts.append(part)
+        if part or match.group("standalone") is not None:
+            part_start = match.end()
     last_part = normalized[part_start:].strip(trim)
     if last_part:
         parts.append(last_part)
