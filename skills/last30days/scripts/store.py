@@ -271,6 +271,7 @@ def init_db(db_path: Optional[Path] = None) -> Path:
         conn.executescript(SCHEMA_V1_DEFAULTS)
         _run_migrations(conn)
         conn.commit()
+        _backfill_owner_sightings(conn)
     finally:
         conn.close()
 
@@ -291,17 +292,48 @@ def _run_migrations(conn: sqlite3.Connection):
             )
 
 
+def _backfill_owner_sightings(conn: sqlite3.Connection) -> None:
+    """Preserve legacy first observations before aggregate ownership can change."""
+    marker = "_topic_sightings_backfilled_v1"
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM settings WHERE key = ?", (marker,)).fetchone():
+            return
+        conn.execute(
+            """INSERT INTO finding_sightings
+               (finding_id, run_id, topic_id, source, source_url, source_title,
+                engagement_score, relevance_score, seen_at)
+               SELECT f.id, NULL, f.topic_id, f.source, COALESCE(f.source_url, ''),
+                      f.source_title, f.engagement_score, f.relevance_score, f.first_seen
+               FROM findings f
+               WHERE f.topic_id IS NOT NULL AND f.first_seen IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM finding_sightings s
+                     WHERE s.finding_id = f.id AND s.topic_id = f.topic_id
+                       AND s.seen_at <= f.first_seen
+                 )"""
+        )
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, '1')", (marker,))
+
+
 # --- Topics ---
 
 
-# Aggregate references retain the known memberships of pre-ledger databases.
+# Ledger dates survive aggregate ownership reassignment; references are a legacy fallback.
 _FINDING_TOPICS_SQL = """
-SELECT id AS finding_id, topic_id FROM findings WHERE topic_id IS NOT NULL
-UNION
-SELECT finding_id, topic_id FROM finding_sightings WHERE topic_id IS NOT NULL
-UNION
-SELECT f.id, r.topic_id FROM findings f
-JOIN research_runs r ON r.id = f.run_id WHERE r.topic_id IS NOT NULL
+SELECT finding_id, topic_id,
+       COALESCE(MIN(sighting_seen), MIN(legacy_first_seen)) AS first_seen
+FROM (
+    SELECT id AS finding_id, topic_id, NULL AS sighting_seen, first_seen AS legacy_first_seen
+    FROM findings WHERE topic_id IS NOT NULL
+    UNION ALL
+    SELECT finding_id, topic_id, seen_at, NULL
+    FROM finding_sightings WHERE topic_id IS NOT NULL
+    UNION ALL
+    SELECT f.id, r.topic_id, NULL, r.run_date FROM findings f
+    JOIN research_runs r ON r.id = f.run_id WHERE r.topic_id IS NOT NULL
+)
+GROUP BY finding_id, topic_id
 """
 
 
@@ -770,26 +802,29 @@ def get_new_findings(
     since: Optional[str] = None,
     before: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Get findings for a topic within inclusive since/exclusive before dates."""
+    """Get findings by their first observation for this topic within the date bounds."""
     conn = _connect()
     try:
         date_filter = ""
         parameters: List[Any] = [topic_id]
         if since:
-            date_filter += " AND first_seen >= ?"
+            date_filter += " AND m.first_seen >= ?"
             parameters.append(since)
         if before:
-            date_filter += " AND first_seen < ?"
+            date_filter += " AND m.first_seen < ?"
             parameters.append(before)
         rows = conn.execute(
             f"""WITH memberships AS ({_FINDING_TOPICS_SQL})
-                SELECT * FROM findings
-                WHERE id IN (SELECT finding_id FROM memberships WHERE topic_id = ?)
-                  AND dismissed = 0{date_filter}
-                ORDER BY first_seen DESC""",
+                SELECT f.*, m.first_seen AS topic_first_seen FROM findings f
+                JOIN memberships m ON m.finding_id = f.id
+                WHERE m.topic_id = ? AND f.dismissed = 0{date_filter}
+                ORDER BY m.first_seen DESC""",
             parameters,
         ).fetchall()
-        return [dict(r) for r in rows]
+        findings = [dict(r) for r in rows]
+        for finding in findings:
+            finding["first_seen"] = finding.pop("topic_first_seen")
+        return findings
     finally:
         conn.close()
 
@@ -1166,7 +1201,7 @@ def get_trending(days: int = 7) -> List[Dict[str, Any]]:
                       COALESCE(SUM(f.engagement_score), 0) as total_engagement
                FROM topics t
                LEFT JOIN memberships m ON m.topic_id = t.id
-               LEFT JOIN findings f ON f.id = m.finding_id AND f.first_seen >= ?
+               LEFT JOIN findings f ON f.id = m.finding_id AND m.first_seen >= ?
                WHERE t.enabled = 1
                GROUP BY t.id
                ORDER BY new_findings DESC""",
