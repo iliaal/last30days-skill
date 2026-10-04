@@ -3,11 +3,13 @@
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import store
 import watchlist
+from lib import usage
 
 
 @pytest.fixture
@@ -116,3 +118,34 @@ def test_run_one_respects_spend_from_previous_failure(isolated_store, tmp_path, 
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "skipped"
     assert store.get_daily_cost() == pytest.approx(1.25)
+
+
+@pytest.mark.parametrize("failure", ["directory", "journal"])
+def test_prelaunch_setup_failure_does_not_block_later_research(
+    isolated_store, tmp_path, monkeypatch, capsys, failure,
+):
+    install_child(tmp_path, monkeypatch)
+    topic = store.get_topic("First")
+    with monkeypatch.context() as setup_failure:
+        if failure == "directory":
+            unavailable = tmp_path / "not-a-directory"
+            unavailable.write_text("file blocks temporary directory creation")
+            setup_failure.setattr(watchlist.tempfile, "tempdir", str(unavailable))
+        else:
+            original_open = usage.os.open
+
+            def deny_journal(path, *args, **kwargs):
+                if Path(path).name == "usage.db":
+                    raise PermissionError("journal creation denied")
+                return original_open(path, *args, **kwargs)
+
+            setup_failure.setattr(usage.os, "open", deny_journal)
+        with pytest.raises(OSError):
+            watchlist._run_topic(topic)
+
+    assert store.get_daily_unknown_cost_runs() == 0
+    assert store.get_daily_cost() == 0
+    watchlist.cmd_run_one(SimpleNamespace(topic="First"))
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "completed"
+    assert store.get_daily_cost() == pytest.approx(0.6)
