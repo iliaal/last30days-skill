@@ -759,12 +759,15 @@ def _fallback_plan(
     )
 
 
+_SLASH_COMPARISON = re.compile(r"\b[A-Z][a-z]{2,}(?:/[A-Z][a-z]{2,})+\b")
+
+
 def _infer_intent(topic: str) -> str:
     text = topic.lower().strip()
     if re.search(r"\b(vs|versus|compare|compared to|difference between)\b", text):
         return "comparison"
     # Slash-separated proper nouns: "React/Vue/Svelte" (not URLs, not acronyms like CI/CD or I/O)
-    if not re.search(r"https?://", topic) and re.search(r"\b[A-Z][a-z]{2,}(?:/[A-Z][a-z]{2,})+\b", topic):
+    if not re.search(r"https?://", topic) and _SLASH_COMPARISON.search(topic):
         return "comparison"
     if re.search(r"\b(odds|predict|prediction|forecast|chance|probability|will .* win)\b", text):
         return "prediction"
@@ -902,6 +905,9 @@ def _comparison_entities(topic: str, *, uncapped: bool = False) -> list[str]:
     Caps at ``competitors.COMPARISON_ENTITY_MAX`` unless ``uncapped`` (caller
     truncates and may warn about dropped entities).
     """
+    if _infer_intent(topic) != "comparison":
+        return []
+
     # "difference between X and Y" -> "X vs Y" (replace "and" only in this context)
     normalized = re.sub(
         r"\bdifference between\s+(.+?)\s+and\s+",
@@ -910,9 +916,16 @@ def _comparison_entities(topic: str, *, uncapped: bool = False) -> list[str]:
         flags=re.I,
     )
     normalized = re.sub(r"\b(compared to)\b", " vs ", normalized, flags=re.I)
+    separator = r"(?<!\S)(?:vs\.?|versus)(?!\S)"
+    if not re.search(separator, normalized, flags=re.I):
+        if re.search(r"https?://", normalized):
+            return []
+        normalized = _SLASH_COMPARISON.sub(
+            lambda match: match.group(0).replace("/", " vs "), normalized,
+        )
     parts = [
         part.strip(" \t\r\n?.,:;!()[]{}\"'")
-        for part in re.split(r"\bvs\.?\b|\bversus\b|/", normalized, flags=re.I)
+        for part in re.split(separator, normalized, flags=re.I)
         if part.strip(" \t\r\n?.,:;!()[]{}\"'")
     ]
     # Strip trailing context from parts ("Svelte for frontend in 2026" -> "Svelte")
