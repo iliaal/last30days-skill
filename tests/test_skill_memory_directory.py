@@ -108,6 +108,105 @@ def test_process_placeholder_uses_trusted_project_setting(shell_env, tmp_path, p
     assert result.stdout == (str(tmp_path / project_value) if project_value else "") + "\n"
 
 
+@pytest.mark.parametrize(("process_value", "global_value", "expected"), [
+    (None, "/tmp/global research", "/tmp/global research"),
+    ("${user_config.memory_dir}", "/tmp/global research", "/tmp/global research"),
+    (None, "", ""),
+    ("${user_config.memory_dir}", "", ""),
+    ("", "/tmp/global research", ""),
+    ("/tmp/process research", "/tmp/global research", "/tmp/process research"),
+    (None, None, None),
+    (None, "${user_config.memory_dir}", None),
+    ("${user_config.memory_dir}", "${user_config.memory_dir}", None),
+])
+def test_project_placeholder_preserves_memory_precedence(
+    shell_env, tmp_path, process_value, global_value, expected,
+):
+    shell_env["HOME"] = str(tmp_path / "home")
+    config_text = "LAST30DAYS_TRUST_PROJECT_CONFIG=1\n"
+    if global_value is not None:
+        config_text += f"LAST30DAYS_MEMORY_DIR={global_value}\n"
+    write_config(Path(shell_env["LAST30DAYS_CONFIG_DIR"]) / ".env", config_text)
+    write_config(
+        tmp_path / ".claude" / "last30days.env",
+        "LAST30DAYS_MEMORY_DIR=${user_config.memory_dir}\n",
+    )
+    if process_value is not None:
+        shell_env["LAST30DAYS_MEMORY_DIR"] = process_value
+
+    result = subprocess.run(
+        [sys.executable, str(ENGINE), "--resolve-save-dir"],
+        env=shell_env, cwd=tmp_path, text=True, capture_output=True, check=True,
+    )
+
+    if expected is None:
+        expected = str(tmp_path / "home" / "Documents" / "Last30Days")
+    assert result.stdout == expected + "\n"
+
+
+@pytest.mark.parametrize("entrypoint", ["skill", "engine"])
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("process_value", [None, "${user_config.memory_dir}"])
+def test_project_placeholder_preserves_global_research_save(
+    shell_env, tmp_path, entrypoint, disabled, process_value,
+):
+    shell_env["HOME"] = str(tmp_path / "home")
+    if process_value is not None:
+        shell_env["LAST30DAYS_MEMORY_DIR"] = process_value
+    target = tmp_path / "global research"
+    write_config(
+        Path(shell_env["LAST30DAYS_CONFIG_DIR"]) / ".env",
+        f"LAST30DAYS_MEMORY_DIR={'' if disabled else target}\nLAST30DAYS_TRUST_PROJECT_CONFIG=1\n",
+    )
+    write_config(
+        tmp_path / ".claude" / "last30days.env",
+        "LAST30DAYS_MEMORY_DIR=${user_config.memory_dir}\n",
+    )
+    command = '"$LAST30DAYS_PYTHON" "$SKILL_DIR/scripts/last30days.py" OpenAI --mock --quick --no-browser-cookies --emit=compact'
+    if entrypoint == "skill":
+        assignment = re.findall(r"^LAST30DAYS_MEMORY_DIR=.*$", (SKILL / "SKILL.md").read_text(), re.M)[0]
+        command = assignment + "\n" + command + ' --save-dir="$LAST30DAYS_MEMORY_DIR"'
+    result = subprocess.run(
+        [BASH, "-c", command], env=shell_env, cwd=tmp_path,
+        text=True, capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    if disabled:
+        assert "Raw results saved to" not in result.stdout
+        assert not target.exists()
+    else:
+        artifacts = list(target.glob("*.md"))
+        assert len(artifacts) == 1
+        assert f"Raw results saved to {artifacts[0]}" in result.stdout
+        assert "OpenAI" in artifacts[0].read_text()
+    assert not (tmp_path / "home" / "Documents" / "Last30Days").exists()
+    assert not (tmp_path / "${user_config.memory_dir}").exists()
+
+
+def test_bare_engine_with_only_memory_placeholders_does_not_save(shell_env, tmp_path):
+    shell_env["HOME"] = str(tmp_path / "home")
+    shell_env["LAST30DAYS_MEMORY_DIR"] = "${user_config.memory_dir}"
+    write_config(
+        Path(shell_env["LAST30DAYS_CONFIG_DIR"]) / ".env",
+        "LAST30DAYS_MEMORY_DIR=${user_config.memory_dir}\nLAST30DAYS_TRUST_PROJECT_CONFIG=1\n",
+    )
+    write_config(
+        tmp_path / ".claude" / "last30days.env",
+        "LAST30DAYS_MEMORY_DIR=${user_config.memory_dir}\n",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ENGINE), "OpenAI", "--mock", "--quick", "--no-browser-cookies", "--emit=compact"],
+        env=shell_env, cwd=tmp_path, text=True, capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "✅ All agents reported back!" in result.stdout
+    assert "Raw results saved to" not in result.stdout
+    assert not list(tmp_path.rglob("*-raw.md"))
+
+
 @pytest.mark.parametrize("flag", ["flag research", "", "${user_config.memory_dir}", "prefix-${user_config.memory_dir}"])
 def test_resolver_explicit_flag_wins(shell_env, tmp_path, flag):
     shell_env["LAST30DAYS_MEMORY_DIR"] = "/tmp/process research"
