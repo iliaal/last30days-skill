@@ -2805,6 +2805,17 @@ def run(
         resolved_handles=resolved_handles,
     )
     ranked_public = rerank.prune_fallback_entity_misses(ranked_public, topic=topic)
+    if hiring_summary:
+        # The diagnostic source dump retains pruned jobs; hiring aggregation
+        # needs their rejection identities after they leave the ranked pool.
+        retained_ids = {candidate.candidate_id for candidate in ranked_public}
+        hiring_summary["rejected_job_keys"] = sorted({
+            fusion.candidate_key(item)
+            for candidate in public_candidates
+            if candidate.candidate_id not in retained_ids
+            for item in candidate.source_items
+            if item.source == "jobs"
+        })
     # Private corpus already cleared a body-aware retrieval floor; do not apply
     # the public title/snippet visibility gate (filenames often omit the head
     # token even when the document body matched).

@@ -1,6 +1,8 @@
+import copy
+
 import pytest
 
-from lib import cluster, fusion, hiring_signals, normalize, render, rerank, schema
+from lib import cluster, fusion, hiring_signals, http, normalize, pipeline, render, rerank, schema
 
 
 def _jobs(count):
@@ -141,3 +143,81 @@ def test_hiring_analysis_excludes_rejected_roles_from_full_board(rejection):
     assert "## Hiring Signals" in text
     assert jobs[-1].title not in text
     assert "evidence: 5 roles" in text
+
+
+@pytest.mark.parametrize("only_rejected", [False, True])
+def test_hiring_analysis_does_not_revive_pruned_entity_miss(monkeypatch, only_rejected):
+    jobs = _jobs(6)
+    jobs[-1].title = "Founding Research Scientist, Human Simulation"
+    jobs[-1].body = "Research an unrelated company."
+    rejected_title = jobs[-1].title
+    if only_rejected:
+        jobs = jobs[-1:]
+
+    def careers_page(url, **kwargs):
+        assert url == "https://acme.com/careers"
+        return '<a href="https://boards.greenhouse.io/acme">Careers</a>'
+
+    def board_response(url, **kwargs):
+        assert url == "https://boards-api.greenhouse.io/v1/boards/acme/jobs"
+        return {"jobs": [
+            {
+                "id": job.item_id,
+                "title": job.title,
+                "content": job.body,
+                "absolute_url": job.url,
+                "updated_at": "2026-06-01",
+                "departments": [{"name": "Engineering"}],
+            }
+            for job in jobs
+        ]}
+
+    monkeypatch.setattr(http, "get_text", careers_page)
+    monkeypatch.setattr(http, "get", board_response)
+    report = pipeline.run(
+        topic="Acme",
+        config={"FROM_BROWSER": "off", "LAST30DAYS_X_BACKEND": "xai"},
+        depth="quick",
+        requested_sources=["jobs"],
+        hiring_signals_mode=True,
+        web_backend="none",
+    )
+
+    assert any(item.title == rejected_title for item in report.items_by_source["jobs"])
+    assert all(candidate.title != rejected_title for candidate in report.ranked_candidates)
+
+    text = render.render_compact(report)
+
+    assert rejected_title not in text
+    if not only_rejected:
+        assert "## Hiring Signals" in text
+        assert "evidence: 5 roles" in text
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_hiring_analysis_uses_canonical_job_urls(rejected):
+    jobs = _jobs(5)
+    jobs[-1].title = "Founding Research Scientist, Human Simulation"
+    if rejected:
+        jobs[-1].body = "Research an unrelated company."
+        jobs[-1].snippet = jobs[-1].body
+    report = _report(jobs, pool_limit=5)
+    original = jobs[-1]
+    variant = copy.deepcopy(original)
+    variant.item_id = "other-stream-id"
+    variant.url = original.url.upper() + "/?utm_source=jobs"
+    report.items_by_source["jobs"] = [*jobs[:-1], variant]
+    assert fusion.candidate_key(original) == fusion.candidate_key(variant)
+    if rejected:
+        candidate = next(
+            candidate for candidate in report.ranked_candidates
+            if candidate.item_id == original.item_id
+        )
+        assert "entity-miss" in candidate.explanation
+        assert not rerank.candidate_relevance_ok(candidate)
+
+    text = render.render_compact(report)
+
+    assert f"evidence: {4 if rejected else 5} roles" in text
+    if rejected:
+        assert original.title not in text
