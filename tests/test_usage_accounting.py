@@ -115,8 +115,19 @@ def test_brightdata_charge_without_usd_remains_unknown(journal, monkeypatch):
 def test_grok_charge_without_usd_remains_unknown(journal, tmp_path, monkeypatch):
     monkeypatch.setattr(grok_x, "binary_path", lambda: "/dummy/grok")
     monkeypatch.setattr(grok_x, "_stage_child_home", lambda _: str(tmp_path))
-    monkeypatch.setattr(grok_x.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess([], 0, "{}", ""))
-    grok_x._invoke("topic", 1)
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == ["/dummy/grok", "--version"]:
+            assert usage.read_journal(journal)["cost_unknown"] == 0
+            return subprocess.CompletedProcess(cmd, 0, "grok 1.0.46 (2765805b9442)", "")
+        assert cmd[:3] == ["/dummy/grok", "-p", "topic"]
+        return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+    monkeypatch.setattr(grok_x.subprocess, "run", run)
+    assert grok_x._invoke("topic", 1) == {"text": "{}"}
+    assert len(calls) == 2
     assert usage.read_journal(journal)["cost_unknown"] == 1
 
 
