@@ -124,6 +124,25 @@ def _log(msg: str):
     log.source_log("Bird", msg, tty_only=False)
 
 
+def _scrub_credentials(text: str) -> str:
+    """Redact X session cookie values from subprocess output.
+
+    A failure reason built from bird-search's stderr reaches the run's
+    ``source_status`` detail, which is rendered in the report and returned by
+    ``--emit=json``. The vendored client receives AUTH_TOKEN/CT0 in its
+    environment, so an error message that echoes a rejected cookie would
+    otherwise carry it into user-facing output. Log lines get the same
+    treatment because stderr is captured in agent harnesses.
+    """
+    scrubbed = text
+    for name in ("AUTH_TOKEN", "CT0", "TWITTER_AUTH_TOKEN", "TWITTER_CT0"):
+        value = _credentials.get(name) or os.environ.get(name)
+        # Short values would match too much ordinary text to be worth it.
+        if value and len(value) >= 8:
+            scrubbed = scrubbed.replace(value, "<redacted>")
+    return scrubbed
+
+
 def classify_run_failure(detail: str) -> str:
     """Map Bird's subprocess-only failure shapes to run outcome states."""
     text = detail.lower()
@@ -532,6 +551,7 @@ def search_handles(
     topic: Optional[str],
     from_date: str,
     count_per: int = 5,
+    failure_out: Optional[List[str]] = None,
     *,
     to_date: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -548,6 +568,9 @@ def search_handles(
         topic: Search topic — used for relevance ranking only, not the query
         from_date: Start date (YYYY-MM-DD)
         count_per: Results to request per handle
+        failure_out: When provided, a short reason is appended for every
+            per-handle failure branch, so the caller can distinguish a
+            transport failure from a handle that genuinely posted nothing.
         to_date: Inclusive end date (YYYY-MM-DD), when supplied
 
     Returns:
@@ -555,6 +578,10 @@ def search_handles(
     """
     core_topic = _extract_core_subject(topic) if topic else None
     date_filters = _date_filters(from_date, to_date)
+
+    def _note(msg: str) -> None:
+        if failure_out is not None:
+            failure_out.append(msg)
 
     def _search_one_handle(handle: str) -> List[Dict[str, Any]]:
         handle = handle.lstrip("@")
@@ -572,15 +599,21 @@ def search_handles(
             result = subproc.run_with_timeout(cmd, timeout=15, env=_subprocess_env())
         except subproc.SubprocTimeout:
             _log(f"Handle search timed out for @{handle}")
+            _note(f"@{handle}: bird-search timed out after 15s")
             return []
         except OSError as e:
             _log(f"Handle search error for @{handle}: {e}")
+            _note(f"@{handle}: could not spawn bird-search ({e})")
             return []
 
         output = result.stdout.strip()
         if result.returncode != 0:
             if not output:
-                _log(f"Handle search failed for @{handle}: {result.stderr.strip()}")
+                _log(f"Handle search failed for @{handle}: {_scrub_credentials(result.stderr.strip())}")
+                _note(
+                    f"@{handle}: bird-search exited {result.returncode} "
+                    f"({_scrub_credentials(result.stderr.strip())[:160] or 'no stderr'})"
+                )
                 return []
             # Windows/Node 24: benign libuv assertion can cause non-zero exit
             # AFTER valid JSON is written to stdout. Trust stdout content.
@@ -592,6 +625,7 @@ def search_handles(
             response = json.loads(output)
         except json.JSONDecodeError:
             _log(f"Invalid JSON from handle search for @{handle}")
+            _note(f"@{handle}: bird-search returned invalid JSON")
             return []
         items = parse_bird_response(response, query=core_topic)
         # Log on success/empty too (not only on failure): a silent handle search
@@ -614,6 +648,7 @@ def search_mentions(
     handles: List[str],
     from_date: str,
     count_per: int = 5,
+    failure_out: Optional[List[str]] = None,
     *,
     to_date: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -628,12 +663,19 @@ def search_mentions(
         handles: List of X handles (without @)
         from_date: Start date (YYYY-MM-DD)
         count_per: Results to request per handle
+        failure_out: When provided, a short reason is appended for every
+            per-handle failure branch, so the caller can distinguish a
+            transport failure from a handle nobody mentioned.
         to_date: Inclusive end date (YYYY-MM-DD), when supplied
 
     Returns:
         List of raw item dicts (same format as parse_bird_response output).
     """
     date_filters = _date_filters(from_date, to_date)
+
+    def _note(msg: str) -> None:
+        if failure_out is not None:
+            failure_out.append(msg)
 
     def _search_one(handle: str) -> List[Dict[str, Any]]:
         handle = handle.lstrip("@")
@@ -648,12 +690,18 @@ def search_mentions(
             result = subproc.run_with_timeout(cmd, timeout=15, env=_subprocess_env())
         except subproc.SubprocTimeout:
             _log(f"Mention search timed out for @{handle}")
+            _note(f"@{handle}: bird-search timed out after 15s")
             return []
         except OSError as e:
             _log(f"Mention search error for @{handle}: {e}")
+            _note(f"@{handle}: could not spawn bird-search ({e})")
             return []
         if result.returncode != 0:
-            _log(f"Mention search failed for @{handle}: {result.stderr.strip()}")
+            _log(f"Mention search failed for @{handle}: {_scrub_credentials(result.stderr.strip())}")
+            _note(
+                f"@{handle}: bird-search exited {result.returncode} "
+                f"({_scrub_credentials(result.stderr.strip())[:160] or 'no stderr'})"
+            )
             return []
         output = result.stdout.strip()
         if not output:
@@ -662,6 +710,7 @@ def search_mentions(
             response = json.loads(output)
         except json.JSONDecodeError:
             _log(f"Invalid JSON from mention search for @{handle}")
+            _note(f"@{handle}: bird-search returned invalid JSON")
             return []
         items = parse_bird_response(response, query=None)
         # ABOUT lane = OTHERS mentioning the handle. Drop the handle's own tweets

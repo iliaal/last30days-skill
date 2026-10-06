@@ -1021,9 +1021,14 @@ def enrich_nominations(
         return []
 
     def _run_one(nomination: Nomination) -> schema.Report:
+        # Per-worker copy: run() mutates config in place
+        # (config["_financial_topic"] = ...), so sharing one dict across
+        # daemon threads lets topic A's flag overwrite topic B's mid-run,
+        # with stragglers mutating past budget expiry. Same idiom as the
+        # competitor runner (entity_config = dict(config)).
         return run(
             topic=nomination.name,
-            config=config,
+            config=dict(config),
             depth=depth,
             requested_sources=requested_sources,
             mock=mock,
@@ -2805,6 +2810,17 @@ def run(
         resolved_handles=resolved_handles,
     )
     ranked_public = rerank.prune_fallback_entity_misses(ranked_public, topic=topic)
+    if hiring_summary:
+        # The diagnostic source dump retains pruned jobs; hiring aggregation
+        # needs their rejection identities after they leave the ranked pool.
+        retained_ids = {candidate.candidate_id for candidate in ranked_public}
+        hiring_summary["rejected_job_keys"] = sorted({
+            fusion.candidate_key(item)
+            for candidate in public_candidates
+            if candidate.candidate_id not in retained_ids
+            for item in candidate.source_items
+            if item.source == "jobs"
+        })
     # Private corpus already cleared a body-aware retrieval floor; do not apply
     # the public title/snippet visibility gate (filenames often omit the head
     # token even when the document body matched).
@@ -3533,11 +3549,41 @@ def _warnings(
     return warnings
 
 
+_STATUS_PREFIX = r"\b(?:https?(?:/\d(?:\.\d)?)?(?:\s+error)?|status(?:[\s_]*code)?|code)\s*[:=#]?\s*"
+
+
+def _mentions_status(msg: str, code_pattern: str, phrases: tuple[str, ...]) -> bool:
+    """True when ``msg`` names an HTTP status matching ``code_pattern``.
+
+    A bare number is not enough (``"batch 429 failed"`` is not a rate
+    limit): the code must follow an HTTP/status/code marker, or co-occur
+    with one of ``phrases`` (``"rate limited (429)"``). Digit-aware
+    boundaries keep ``"14293"`` from reading as a 429.
+    """
+    if not msg:
+        return False
+    code = r"(?:" + code_pattern + r")(?!\d)"
+    if re.search(_STATUS_PREFIX + code, msg, re.IGNORECASE):
+        return True
+    lowered = msg.lower()
+    return any(p in lowered for p in phrases) and re.search(r"(?<!\d)" + code, msg) is not None
+
+
+_RATE_LIMIT_PHRASES = ("rate limit", "rate-limit", "ratelimit", "too many requests")
+_SERVER_ERROR_PHRASES = (
+    "server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "gateway time-out",
+)
+
+
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Detect 429 rate-limit errors by status code or message text."""
     if hasattr(exc, "status_code") and getattr(exc, "status_code", None) == 429:
         return True
-    return "429" in str(exc)
+    return _mentions_status(str(exc), "429", _RATE_LIMIT_PHRASES)
 
 
 class SourceRunError(RuntimeError):
@@ -3772,8 +3818,7 @@ def _is_transient_error(exc: Exception) -> bool:
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and 500 <= status < 600:
         return True
-    msg = str(exc)
-    return any(code in msg for code in ("500", "502", "503", "504"))
+    return _mentions_status(str(exc), r"5\d\d", _SERVER_ERROR_PHRASES)
 
 
 def _topic_handle_mentions(topic: str) -> set[str]:
@@ -3852,6 +3897,10 @@ def _run_supplemental_searches(
     resolved_handles_out: list[str] | None = None,
 ) -> None:
     """Phase 2: extract entities from Phase 1 results, run targeted supplemental searches."""
+    # The sanitized plan already intersects requested, available, and excluded
+    # sources. A handle or host envelope must not expand that source boundary.
+    if not any("x" in subquery.sources for subquery in plan.subqueries):
+        return
     from_date, to_date = date_range
 
     # Host-fetched X lane: the envelope's lane calls replace the backend
@@ -3963,6 +4012,40 @@ def _run_supplemental_searches(
     # with the user's browser cookies; xquik runs the same lanes over its REST
     # API. All items land under the single "x" slug.
     x_slug = "x"
+
+    def _record_handle_lane_failures(lane: str, failures: list[str]) -> bool:
+        """Surface handle-lane failures the adapter would otherwise swallow.
+
+        bird and xquik report a per-handle failure by returning no items, so an
+        empty lane is indistinguishable from a subject who simply did not post.
+        Left unrecorded, the run reports the X source as a clean zero and the
+        report states as fact that nothing was posted.
+
+        Returns True when the failure is auth-shaped, so the caller's existing
+        AUTH_FAILED branch owns the message and the fix hint. Everything else
+        (timeout, spawn failure, non-zero exit, bad JSON) is recorded here.
+        ``record_failure`` keeps already-returned items as partial.
+        """
+        if not failures:
+            return False
+        detail = "; ".join(failures[:3])
+        if len(failures) > 3:
+            detail += f" (+{len(failures) - 3} more)"
+        # Only xquik reports an auth-shaped handle-lane failure; bird's are all
+        # transport (timeout / spawn / exit / JSON). Match the two phrases
+        # xquik._execute_search actually emits rather than adding a fifth
+        # copy of this repo's auth-marker vocabulary.
+        lowered = detail.lower()
+        if "auth failed" in lowered or "key unpaid" in lowered:
+            return True
+        bundle.record_failure(
+            x_slug,
+            health.UNREACHABLE,
+            f"Phase 2 {lane}-lane: {detail}",
+            attempted=True,
+        )
+        return False
+
     chain = env.x_backend_chain(config)
     # Trust an explicit runtime backend as the head of the chain.
     pinned = runtime.x_search_backend
@@ -4011,14 +4094,20 @@ def _run_supplemental_searches(
     elif primary == "bird":
         def _from_lane(hs: list, count: int, and_topic: bool = False) -> tuple[list, bool]:
             # bird_x.search_handles doesn't support and_topic yet
-            return bird_x.search_handles(
-                hs, topic, from_date, count_per=count, to_date=to_date,
-            ), False
+            failures: list[str] = []
+            items = bird_x.search_handles(
+                hs, topic, from_date, count_per=count, failure_out=failures,
+                to_date=to_date,
+            )
+            return items, _record_handle_lane_failures("FROM", failures)
 
         def _about_lane(hs: list, count: int) -> tuple[list, bool]:
-            return bird_x.search_mentions(
-                hs, from_date, count_per=count, to_date=to_date,
-            ), False
+            failures: list[str] = []
+            items = bird_x.search_mentions(
+                hs, from_date, count_per=count, failure_out=failures,
+                to_date=to_date,
+            )
+            return items, _record_handle_lane_failures("ABOUT", failures)
     elif primary == "xapi":
         # Direct X API v2 with the app-only bearer: from:/@ lanes run over
         # search/all with the recent-search fallback. One budget shared by
@@ -4060,10 +4149,20 @@ def _run_supplemental_searches(
 
         def _from_lane(hs: list, count: int, and_topic: bool = False) -> tuple[list, bool]:
             # xquik.search_handles doesn't support and_topic yet
-            return xquik.search_handles(hs, topic, from_date, to_date, count_per=count, token=xquik_token), False
+            failures: list[str] = []
+            items = xquik.search_handles(
+                hs, topic, from_date, to_date, count_per=count, token=xquik_token,
+                failure_out=failures,
+            )
+            return items, _record_handle_lane_failures("FROM", failures)
 
         def _about_lane(hs: list, count: int) -> tuple[list, bool]:
-            return xquik.search_mentions(hs, from_date, to_date, topic=topic, count_per=count, token=xquik_token), False
+            failures: list[str] = []
+            items = xquik.search_mentions(
+                hs, from_date, to_date, topic=topic, count_per=count,
+                token=xquik_token, failure_out=failures,
+            )
+            return items, _record_handle_lane_failures("ABOUT", failures)
     else:
         return  # primary X backend has no handle-lane support (xai/xurl) or none configured
 
@@ -4122,7 +4221,7 @@ def _run_supplemental_searches(
                     any_revoked = True
                     bundle.record_failure(
                         x_slug, schema.AUTH_FAILED,
-                        "Phase 2 FROM-lane (explicit): grok session expired or was revoked",
+                        f"Phase 2 FROM-lane (explicit): {primary} authentication failed (session expired, revoked, or key unpaid)",
                         attempted=True,
                     )
             except Exception as exc:
@@ -4141,7 +4240,7 @@ def _run_supplemental_searches(
                     any_revoked = True
                     bundle.record_failure(
                         x_slug, schema.AUTH_FAILED,
-                        "Phase 2 FROM-lane (extracted): grok session expired or was revoked",
+                        f"Phase 2 FROM-lane (extracted): {primary} authentication failed (session expired, revoked, or key unpaid)",
                         attempted=True,
                     )
             except Exception as exc:
@@ -4159,7 +4258,7 @@ def _run_supplemental_searches(
                 any_revoked = True
                 bundle.record_failure(
                     x_slug, schema.AUTH_FAILED,
-                    "Phase 2 ABOUT-lane: grok session expired or was revoked",
+                    f"Phase 2 ABOUT-lane: {primary} authentication failed (session expired, revoked, or key unpaid)",
                     attempted=True,
                 )
         except Exception as exc:
@@ -4179,7 +4278,7 @@ def _run_supplemental_searches(
                     any_revoked = True
                     bundle.record_failure(
                         x_slug, schema.AUTH_FAILED,
-                        "Phase 2 NAME-lane: grok session expired or was revoked",
+                        f"Phase 2 NAME-lane: {primary} authentication failed (session expired, revoked, or key unpaid)",
                         attempted=True,
                     )
             except Exception as exc:
@@ -4245,7 +4344,7 @@ def _run_supplemental_searches(
                 any_revoked = True
                 bundle.record_failure(
                     x_slug, schema.AUTH_FAILED,
-                    "Phase 2 related handle search: grok session expired or was revoked",
+                    f"Phase 2 related handle search: {primary} authentication failed (session expired, revoked, or key unpaid)",
                     attempted=True,
                 )
         except Exception as exc:
@@ -4543,7 +4642,10 @@ def _retrieve_stream(*args, **kwargs) -> tuple[list[dict], dict]:
     except Exception as exc:
         recorded_exc = exc
         if failures and not getattr(exc, "outcome_state", None):
-            failure = failures[-1]
+            failure = min(
+                failures,
+                key=lambda f: _FAILURE_SPECIFICITY.get(f.outcome_state, 9),
+            )
             recorded_exc = SourceRunError(str(exc), failure.outcome_state)
         if module_backed:
             http.fixture_source_record_error(fixture_request, recorded_exc)
@@ -4936,7 +5038,10 @@ def _retrieve_stream_impl(
         if pinned:
             chain = [pinned] + [b for b in chain if b != pinned]
         if not chain:
-            raise RuntimeError("No X backend is available.")
+            raise SourceRunError(
+                "No X backend is available (not configured).",
+                schema.SKIPPED_UNCONFIGURED,
+            )
         last_error = ""
         chain_errors: list[str] = []
         items = []
