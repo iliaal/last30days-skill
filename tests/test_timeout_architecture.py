@@ -104,7 +104,9 @@ def test_enrich_cancel_skips_network(monkeypatch):
         date_range=("2026-08-01", "2026-08-31"),
         runtime=mock.Mock(), mock=True,
     )
-    assert items == [] and artifact == {}
+    assert items == []
+    assert artifact["_source_outcome"]["state"] == health.TIMEOUT
+    assert artifact["_source_outcome"]["attempted"] is False
 
 
 def test_enrich_cancel_skips_real_transport(monkeypatch):
@@ -125,7 +127,9 @@ def test_enrich_cancel_skips_real_transport(monkeypatch):
         date_range=("2026-08-01", "2026-08-31"),
         runtime=mock.Mock(), mock=False,
     )
-    assert items == [] and artifact == {}
+    assert items == []
+    assert artifact["_source_outcome"]["state"] == health.TIMEOUT
+    assert artifact["_source_outcome"]["attempted"] is False
     assert pipeline.grounding.web_search.call_count == 0
 
 

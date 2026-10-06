@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import env, health, http, log, subproc
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from .relevance import token_overlap_relevance as _compute_relevance
@@ -124,6 +124,25 @@ def _log(msg: str):
     log.source_log("Bird", msg, tty_only=False)
 
 
+def _scrub_credentials(text: str) -> str:
+    """Redact X session cookie values from subprocess output.
+
+    A failure reason built from bird-search's stderr reaches the run's
+    ``source_status`` detail, which is rendered in the report and returned by
+    ``--emit=json``. The vendored client receives AUTH_TOKEN/CT0 in its
+    environment, so an error message that echoes a rejected cookie would
+    otherwise carry it into user-facing output. Log lines get the same
+    treatment because stderr is captured in agent harnesses.
+    """
+    scrubbed = text
+    for name in ("AUTH_TOKEN", "CT0", "TWITTER_AUTH_TOKEN", "TWITTER_CT0"):
+        value = _credentials.get(name) or os.environ.get(name)
+        # Short values would match too much ordinary text to be worth it.
+        if value and len(value) >= 8:
+            scrubbed = scrubbed.replace(value, "<redacted>")
+    return scrubbed
+
+
 def classify_run_failure(detail: str) -> str:
     """Map Bird's subprocess-only failure shapes to run outcome states."""
     text = detail.lower()
@@ -169,7 +188,22 @@ def _plain_query_tokens(text: str) -> list[str]:
 _GROUPING_CHARS = "“”()[]{}"
 
 
-def build_topic_query(topic: str, from_date: str) -> str:
+def _date_filters(from_date: str, to_date: Optional[str] = None) -> str:
+    filters = f"since:{from_date}"
+    if to_date is not None:
+        end = date.fromisoformat(to_date)
+        if end == date.max:
+            # No supported post date lies beyond this inclusive upper bound.
+            return filters
+        # The research window includes to_date; X's until bound is exclusive.
+        until = end + timedelta(days=1)
+        filters += f" until:{until.isoformat()}"
+    return filters
+
+
+def build_topic_query(
+    topic: str, from_date: str, to_date: Optional[str] = None
+) -> str:
     """Build the X topic query, preserving quoted proper-noun phrases.
 
     Previously the topic went through ``_plain_query_tokens``, which stripped
@@ -192,7 +226,7 @@ def build_topic_query(topic: str, from_date: str) -> str:
         if (clean := token.strip("'‘’"))
     ]
     core = " ".join(tokens).strip()
-    return f"{core} since:{from_date}" if core else f"since:{from_date}"
+    return " ".join(part for part in (core, _date_filters(from_date, to_date)) if part)
 
 
 def is_bird_installed() -> bool:
@@ -364,6 +398,7 @@ def _run_bird_search(
     count: int,
     timeout: int,
     deadline: Optional[float] = None,
+    cancel: Any = None,
 ) -> Dict[str, Any]:
     """Run a search using the vendored bird-search.mjs module.
 
@@ -389,6 +424,8 @@ def _run_bird_search(
     attempt_timeout: Optional[int] = timeout
 
     for attempt in range(MAX_JSON_DECODE_RETRIES):
+        if cancel is not None and cancel.is_set():
+            return {"error": "bird: research cancelled", "items": []}
         if attempt > 0:
             attempt_timeout = _clamped_bird_timeout(timeout, deadline)
             if attempt_timeout is None:
@@ -445,7 +482,10 @@ def _run_bird_search(
                     f"{log_msg}; retrying in {JSON_DECODE_RETRY_DELAY:.0f}s",
                     tty_only=False,
                 )
-                time.sleep(JSON_DECODE_RETRY_DELAY)
+                if cancel is not None:
+                    cancel.wait(JSON_DECODE_RETRY_DELAY)
+                else:
+                    time.sleep(JSON_DECODE_RETRY_DELAY)
                 continue
             log.source_log("X/bird", log_msg, tty_only=False)
             return _invalid_json_error(attempt_num, last_decode_error)
@@ -497,13 +537,14 @@ def search_x(
     to_date: str,
     depth: str = "default",
     deadline: Optional[float] = None,
+    cancel: Any = None,
 ) -> Dict[str, Any]:
     """Search X using Bird CLI with automatic retry on 0 results.
 
     Args:
         topic: Search topic
         from_date: Start date (YYYY-MM-DD)
-        to_date: End date (YYYY-MM-DD) - unused but kept for API compatibility
+        to_date: Inclusive end date (YYYY-MM-DD)
         depth: Research depth - "quick", "default", or "deep"
         deadline: Optional shared wall-clock deadline (``time.monotonic()``
             instant) from the X backend chain. Each of the up-to-four
@@ -514,6 +555,7 @@ def search_x(
         Raw Bird JSON response or error dict.
     """
     count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
+    cancel_kwargs = {"cancel": cancel} if cancel is not None else {}
     base_timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
     timeout = _clamped_bird_timeout(base_timeout, deadline)
     if timeout is None:
@@ -523,10 +565,11 @@ def search_x(
     core_subject = _extract_core_subject(topic)
     core_words = _plain_query_tokens(core_subject)
     core_topic = " ".join(core_words)
-    query = build_topic_query(core_subject, from_date)
+    query = build_topic_query(core_subject, from_date, to_date)
+    date_filters = _date_filters(from_date, to_date)
 
     _log(f"Searching: {query}")
-    response = _run_bird_search(query, count, timeout, deadline=deadline)
+    response = _run_bird_search(query, count, timeout, deadline=deadline, **cancel_kwargs)
     last_clean_response = response if not response.get("error") else None
 
     # Check if we got results
@@ -540,11 +583,11 @@ def search_x(
             # Build OR-group query: ("multi-agent" OR "agent simulation") since:DATE
             or_parts = ' OR '.join(f'"{t}"' for t in compounds[:3])
             _log(f"0 results for '{core_topic}', retrying with OR groups: {or_parts}")
-            query = f"({or_parts}) since:{from_date}"
+            query = f"({or_parts}) {date_filters}"
             timeout = _clamped_bird_timeout(base_timeout, deadline)
             if timeout is None:
                 return _budget_stop(response, last_clean_response)
-            response = _run_bird_search(query, count, timeout, deadline=deadline)
+            response = _run_bird_search(query, count, timeout, deadline=deadline, **cancel_kwargs)
             if not response.get("error"):
                 last_clean_response = response
             items = parse_bird_response(response, query=core_topic)
@@ -553,11 +596,11 @@ def search_x(
     if not items and len(core_words) > 2:
         shorter = ' '.join(core_words[:2])
         _log(f"0 results for '{core_topic}', retrying with '{shorter}'")
-        query = f"{shorter} since:{from_date}"
+        query = f"{shorter} {date_filters}"
         timeout = _clamped_bird_timeout(base_timeout, deadline)
         if timeout is None:
             return _budget_stop(response, last_clean_response)
-        response = _run_bird_search(query, count, timeout, deadline=deadline)
+        response = _run_bird_search(query, count, timeout, deadline=deadline, **cancel_kwargs)
         if not response.get("error"):
             last_clean_response = response
         items = parse_bird_response(response, query=core_topic)
@@ -581,14 +624,16 @@ def search_x(
             strongest = max(candidates, key=len)
             retry_terms = anchor if strongest == anchor else f"{anchor} {strongest}"
             _log(f"0 results for '{core_topic}', retrying anchored on '{retry_terms}'")
-            query = f"{retry_terms} since:{from_date}"
+            query = f"{retry_terms} {date_filters}"
             timeout = _clamped_bird_timeout(base_timeout, deadline)
             if timeout is None:
                 return _budget_stop(response, last_clean_response)
-            response = _run_bird_search(query, count, timeout, deadline=deadline)
+            response = _run_bird_search(query, count, timeout, deadline=deadline, **cancel_kwargs)
             if not response.get("error"):
                 last_clean_response = response
 
+    if cancel is not None and cancel.is_set():
+        return {**response, "error": "bird: research cancelled"}
     if response.get("error") and last_clean_response is not None:
         _log("Optional retry failed after a clean empty response; preserving no-results outcome")
         return last_clean_response
@@ -600,6 +645,11 @@ def search_handles(
     topic: Optional[str],
     from_date: str,
     count_per: int = 5,
+    failure_out: Optional[List[str]] = None,
+    *,
+    to_date: Optional[str] = None,
+    deadline: Optional[float] = None,
+    cancel: Any = None,
 ) -> List[Dict[str, Any]]:
     """Search specific X handles for topic-related content.
 
@@ -614,16 +664,29 @@ def search_handles(
         topic: Search topic — used for relevance ranking only, not the query
         from_date: Start date (YYYY-MM-DD)
         count_per: Results to request per handle
+        failure_out: When provided, a short reason is appended for every
+            per-handle failure branch, so the caller can distinguish a
+            transport failure from a handle that genuinely posted nothing.
+        to_date: Inclusive end date (YYYY-MM-DD), when supplied
 
     Returns:
         List of raw item dicts (same format as parse_bird_response output).
     """
     core_topic = _extract_core_subject(topic) if topic else None
+    date_filters = _date_filters(from_date, to_date)
+
+    def _note(msg: str) -> None:
+        if failure_out is not None:
+            failure_out.append(msg)
 
     def _search_one_handle(handle: str) -> List[Dict[str, Any]]:
+        timeout = _clamped_bird_timeout(15, deadline)
+        if timeout is None or (cancel is not None and cancel.is_set()):
+            _note("bird handle research cancelled or timed out")
+            return []
         handle = handle.lstrip("@")
         # Always unfiltered: pull the timeline, rank by topic relevance below.
-        query = f"from:{handle} since:{from_date}"
+        query = f"from:{handle} {date_filters}"
 
         cmd = [
             "node", str(_BIRD_SEARCH_MJS),
@@ -633,18 +696,24 @@ def search_handles(
         ]
 
         try:
-            result = subproc.run_with_timeout(cmd, timeout=15, env=_subprocess_env())
+            result = subproc.run_with_timeout(cmd, timeout=timeout, env=_subprocess_env())
         except subproc.SubprocTimeout:
             _log(f"Handle search timed out for @{handle}")
+            _note(f"@{handle}: bird-search timed out after 15s")
             return []
         except OSError as e:
             _log(f"Handle search error for @{handle}: {e}")
+            _note(f"@{handle}: could not spawn bird-search ({e})")
             return []
 
         output = result.stdout.strip()
         if result.returncode != 0:
             if not output:
-                _log(f"Handle search failed for @{handle}: {result.stderr.strip()}")
+                _log(f"Handle search failed for @{handle}: {_scrub_credentials(result.stderr.strip())}")
+                _note(
+                    f"@{handle}: bird-search exited {result.returncode} "
+                    f"({_scrub_credentials(result.stderr.strip())[:160] or 'no stderr'})"
+                )
                 return []
             # Windows/Node 24: benign libuv assertion can cause non-zero exit
             # AFTER valid JSON is written to stdout. Trust stdout content.
@@ -656,6 +725,7 @@ def search_handles(
             response = json.loads(output)
         except json.JSONDecodeError:
             _log(f"Invalid JSON from handle search for @{handle}")
+            _note(f"@{handle}: bird-search returned invalid JSON")
             return []
         items = parse_bird_response(response, query=core_topic)
         # Log on success/empty too (not only on failure): a silent handle search
@@ -678,6 +748,11 @@ def search_mentions(
     handles: List[str],
     from_date: str,
     count_per: int = 5,
+    failure_out: Optional[List[str]] = None,
+    *,
+    to_date: Optional[str] = None,
+    deadline: Optional[float] = None,
+    cancel: Any = None,
 ) -> List[Dict[str, Any]]:
     """Search for tweets ABOUT/TO each handle — the mention lane.
 
@@ -690,13 +765,27 @@ def search_mentions(
         handles: List of X handles (without @)
         from_date: Start date (YYYY-MM-DD)
         count_per: Results to request per handle
+        failure_out: When provided, a short reason is appended for every
+            per-handle failure branch, so the caller can distinguish a
+            transport failure from a handle nobody mentioned.
+        to_date: Inclusive end date (YYYY-MM-DD), when supplied
 
     Returns:
         List of raw item dicts (same format as parse_bird_response output).
     """
+    date_filters = _date_filters(from_date, to_date)
+
+    def _note(msg: str) -> None:
+        if failure_out is not None:
+            failure_out.append(msg)
+
     def _search_one(handle: str) -> List[Dict[str, Any]]:
+        timeout = _clamped_bird_timeout(15, deadline)
+        if timeout is None or (cancel is not None and cancel.is_set()):
+            _note("bird mention research cancelled or timed out")
+            return []
         handle = handle.lstrip("@")
-        query = f"@{handle} since:{from_date}"
+        query = f"@{handle} {date_filters}"
         cmd = [
             "node", str(_BIRD_SEARCH_MJS),
             query,
@@ -704,15 +793,21 @@ def search_mentions(
             "--json",
         ]
         try:
-            result = subproc.run_with_timeout(cmd, timeout=15, env=_subprocess_env())
+            result = subproc.run_with_timeout(cmd, timeout=timeout, env=_subprocess_env())
         except subproc.SubprocTimeout:
             _log(f"Mention search timed out for @{handle}")
+            _note(f"@{handle}: bird-search timed out after 15s")
             return []
         except OSError as e:
             _log(f"Mention search error for @{handle}: {e}")
+            _note(f"@{handle}: could not spawn bird-search ({e})")
             return []
         if result.returncode != 0:
-            _log(f"Mention search failed for @{handle}: {result.stderr.strip()}")
+            _log(f"Mention search failed for @{handle}: {_scrub_credentials(result.stderr.strip())}")
+            _note(
+                f"@{handle}: bird-search exited {result.returncode} "
+                f"({_scrub_credentials(result.stderr.strip())[:160] or 'no stderr'})"
+            )
             return []
         output = result.stdout.strip()
         if not output:
@@ -721,6 +816,7 @@ def search_mentions(
             response = json.loads(output)
         except json.JSONDecodeError:
             _log(f"Invalid JSON from mention search for @{handle}")
+            _note(f"@{handle}: bird-search returned invalid JSON")
             return []
         items = parse_bird_response(response, query=None)
         # ABOUT lane = OTHERS mentioning the handle. Drop the handle's own tweets

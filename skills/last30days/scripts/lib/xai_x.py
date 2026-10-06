@@ -75,6 +75,7 @@ def search_x(
     depth: str = "default",
     mock_response: Optional[Dict] = None,
     deadline_monotonic: Optional[float] = None,
+    cancel: Any = None,
 ) -> Dict[str, Any]:
     """Search X for relevant posts using xAI API with live search.
 
@@ -139,6 +140,7 @@ def search_x(
     return http.post(
         XAI_RESPONSES_URL, payload, headers=headers, timeout=timeout,
         retries=1, deadline_monotonic=deadline_monotonic,
+        cancel=cancel,
     )
 
 

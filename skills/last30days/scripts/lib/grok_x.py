@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import log
+from . import log, usage
 from .relevance import token_overlap_relevance as _compute_relevance
 # One copy of the snowflake, handle-grammar, and generated-sequence helpers
 # lives in x_api; grok_x keeps its private names for its callers and
@@ -792,6 +792,7 @@ def _invoke(prompt: str, timeout: int) -> Dict[str, Any]:
     try:
         with tempfile.TemporaryDirectory(prefix="last30days-grok-") as workdir:
             child_home = _stage_child_home(workdir)
+            usage.begin("grok")
             result = subprocess.run(
                 [
                     binary,
@@ -844,6 +845,7 @@ def _run_query(
     attempts: int = 2,
     relevance_topic: str = "",
     deadline: Optional[float] = None,
+    cancel: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], str, bool]:
     """Run one query, retrying only when the response looks fabricated.
 
@@ -859,10 +861,12 @@ def _run_query(
     prompt = _PROMPT.format(tool=tool, query=query, limit=min(limit, _MAX_LIMIT_PER_CALL))
     last_error = ""
     for attempt in range(1, attempts + 1):
+        if cancel is not None and cancel.is_set():
+            return [], last_error or "X research cancelled", False
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining < _MIN_USEFUL_CALL_SECONDS:
-                return [], last_error or "X lane budget exhausted", False
+                return [], "X lane budget exhausted (timed out)", False
             timeout = min(timeout, max(1, int(remaining)))
         _log(f"searching: {query}" + (f" (attempt {attempt})" if attempt > 1 else ""))
         response = _invoke(prompt, timeout)
@@ -928,22 +932,24 @@ def search_x(
         if deadline is not None and time.monotonic() >= deadline:
             if not last_error:
                 last_error = "X lane budget exhausted"
+            invocation_failed = True
             _log("chain deadline reached; skipping remaining grok queries")
             break
         if cancel is not None and getattr(cancel, "is_set", lambda: False)():
             if not last_error:
                 last_error = "enrichment budget exhausted"
+            invocation_failed = True
             _log("enrichment cancelled; skipping remaining grok queries")
             break
         items, error, revoked = _run_query(mode_query, from_date, to_date, depth=depth,
-                                           relevance_topic=topic, deadline=deadline)
+                                           relevance_topic=topic, deadline=deadline, cancel=cancel)
         if revoked:
             auth_revoked = True
             last_error = error or "Grok session expired or was revoked"
             break
         if error and not items:
             last_error = error
-            if "not found" in error or "timed out" in error or "exited" in error:
+            if any(marker in error for marker in ("not found", "timed out", "exited", "cancelled", "budget exhausted")):
                 invocation_failed = True
         for item in items:
             key = item["url"]
@@ -956,11 +962,19 @@ def search_x(
         item["id"] = f"GK{index}"
     if collected:
         result: Dict[str, Any] = {"items": collected[:target]}
+        if not auth_revoked and (
+            (cancel is not None and cancel.is_set())
+            or (deadline is not None and time.monotonic() >= deadline)
+            or "budget exhausted" in last_error
+        ):
+            result["error"] = "X research cancelled or timed out"
         if auth_revoked:
             result["auth_revoked"] = True
         return result
     if auth_revoked:
         return {"items": [], "error": last_error, "auth_revoked": True}
+    if (cancel is not None and cancel.is_set()) or (deadline is not None and time.monotonic() >= deadline):
+        return {"items": [], "error": "X research cancelled or timed out"}
     if invocation_failed:
         return {"items": [], "error": last_error}
     return {"items": []}
@@ -975,6 +989,7 @@ def search_handles(
     count_per: int = 8,
     deadline: Optional[float] = None,
     and_topic: bool = False,
+    cancel: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """BY lane: posts authored by each handle.
 
@@ -991,7 +1006,7 @@ def search_handles(
     collected: List[Dict[str, Any]] = []
     auth_revoked = False
     for handle in handles:
-        if deadline is not None and time.monotonic() >= deadline:
+        if (cancel is not None and cancel.is_set()) or (deadline is not None and time.monotonic() >= deadline):
             _log("lane budget exhausted; skipping remaining handles")
             break
         clean = _clean_handle(handle)
@@ -1005,7 +1020,7 @@ def search_handles(
         items, _, revoked = _run_query(
             query,
             from_date, to_date, limit=count_per, relevance_topic=topic,
-            attempts=1, deadline=deadline,
+            attempts=1, deadline=deadline, cancel=cancel,
         )
         if revoked:
             _log("Grok session revoked; stopping lane")
@@ -1026,6 +1041,7 @@ def search_mentions(
     topic: str = "",
     count_per: int = 5,
     deadline: Optional[float] = None,
+    cancel: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """ABOUT lane (mention form): posts @-mentioning each handle.
 
@@ -1034,7 +1050,7 @@ def search_mentions(
     collected: List[Dict[str, Any]] = []
     auth_revoked = False
     for handle in handles:
-        if deadline is not None and time.monotonic() >= deadline:
+        if (cancel is not None and cancel.is_set()) or (deadline is not None and time.monotonic() >= deadline):
             _log("lane budget exhausted; skipping remaining handles")
             break
         clean = _clean_handle(handle)
@@ -1043,7 +1059,7 @@ def search_mentions(
         items, _, revoked = _run_query(
             f"@{clean} -from:{clean} since:{from_date} until:{to_date}",
             from_date, to_date, limit=count_per, relevance_topic=topic,
-            attempts=1, deadline=deadline,
+            attempts=1, deadline=deadline, cancel=cancel,
         )
         if revoked:
             _log("Grok session revoked; stopping lane")
@@ -1065,6 +1081,7 @@ def search_name(
     count_per: int = 8,
     min_faves: int = 2,
     deadline: Optional[float] = None,
+    cancel: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """ABOUT lane (name form): posts naming the subject in plain text.
 
@@ -1093,7 +1110,7 @@ def search_name(
         if part
     )
     items, _, revoked = _run_query(
-        query, from_date, to_date, limit=count_per, attempts=1, deadline=deadline,
+        query, from_date, to_date, limit=count_per, attempts=1, deadline=deadline, cancel=cancel,
     )
     if revoked:
         _log("Grok session revoked")

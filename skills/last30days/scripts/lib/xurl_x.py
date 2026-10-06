@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import health, http, log
+from . import health, http, log, usage
 from . import x_api
 # One X API v2 depth table and one parser: xurl_x re-imports both.
 from .x_api import DEPTH_CONFIG
@@ -289,10 +289,12 @@ def search_x(
             return {"error": "xurl: chain budget exhausted"}
         timeout = max(1, min(timeout, int(remaining)))
 
+    charge = None
     try:
         # --auth app (app-only bearer): xurl >=1.1 mis-signs OAuth1 requests
         # whose query needs percent-encoding (spaces, parens, ...) -> 401.
         # Bearer auth sends no signature, so multi-word queries work.
+        charge = usage.begin("x")
         result = subprocess.run(
             ["xurl", "search", query, "-n", str(max_results), "--auth", "app"],
             capture_output=True,
@@ -311,6 +313,7 @@ def search_x(
         return json.loads(result.stdout)
 
     except FileNotFoundError:
+        usage.cancel(charge)
         return {"error": ERR_NOT_FOUND}
     except subprocess.TimeoutExpired:
         return {"error": ERR_TIMED_OUT}
