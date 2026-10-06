@@ -692,6 +692,7 @@ def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
         # automated contexts (cron/CI/eval). Read by trustpilot._harvest_allowed.
         ('LAST30DAYS_TRUSTPILOT_NO_BROWSER', None),
         ('FROM_BROWSER', None),
+        ('BROWSER_CONSENT', None),
         # agentcookie sidecar: soft-dep X cookie source (lib/agentcookie.py),
         # active only on extra hosts (Linux / Mac mini / Darwin sink) or when
         # set to "on". "off" disables the sidecar reader.
@@ -1022,8 +1023,8 @@ def _discover_and_apply_x_credentials(config: dict[str, Any]) -> None:
     if mini_extract_first and not have_pair():
         _apply_browser_extract(config)
 
-    # (3) live Chrome CDP — extras only, complete pair only.
-    if extras and not have_pair():
+    # (3) live Chrome CDP — extras only, after browser-cookie consent.
+    if extras and not have_pair() and chrome_cdp.cookie_access_allowed(config):
         pair = chrome_cdp.read_x_cookies(config)
         if pair:
             _apply_x_pair(config, pair["auth_token"], pair["ct0"], "chrome cdp")
@@ -1075,6 +1076,9 @@ def cookie_extraction_browsers(config: dict[str, Any]) -> list[str]:
     list is empty regardless of ``FROM_BROWSER`` unless ``bird`` is pinned.
     """
     if not x_policy(config).cookie_discovery:
+        return []
+    consent = config.get("BROWSER_CONSENT")
+    if consent is not None and str(consent).strip().lower() not in {"1", "true", "yes", "on"}:
         return []
     silent_browsers = ["firefox", "safari"]
     chromium_browsers = ["chrome", "brave", "edge", "vivaldi", "opera", "arc", "chromium"]
@@ -1130,16 +1134,28 @@ def extract_browser_credentials(config: dict[str, Any]) -> dict[str, str]:
     for _service, spec in COOKIE_DOMAINS.items():
         if all(config.get(env_key) for env_key in spec["mapping"].values()):
             continue
+        # Cookies from different browsers can belong to different sessions,
+        # so values are never combined across browsers: a complete set from
+        # one browser wins, else the first browser's partial set is kept.
+        chosen: dict[str, str] | None = None
+        fallback: dict[str, str] | None = None
         for browser in browsers:
             try:
                 cookies = cookie_extract.extract_cookies(browser, spec["domain"], spec["cookies"])
             except Exception:
                 continue
-            if cookies:
-                for cookie_name, env_key in spec["mapping"].items():
-                    if cookie_name in cookies and not config.get(env_key):
-                        extracted[env_key] = cookies[cookie_name]
-                break  # Found cookies for this service, stop trying browsers
+            if not cookies:
+                continue
+            if cookie_extract.has_complete_pair(cookies, spec["cookies"]):
+                chosen = cookies
+                break
+            if fallback is None:
+                fallback = cookies
+        if chosen is None:
+            chosen = fallback or {}
+        for cookie_name, env_key in spec["mapping"].items():
+            if chosen.get(cookie_name) and not config.get(env_key):
+                extracted[env_key] = chosen[cookie_name]
     return extracted
 
 
