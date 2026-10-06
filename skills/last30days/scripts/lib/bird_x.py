@@ -503,13 +503,16 @@ def _budget_stop(
 ) -> Dict[str, Any]:
     """Outcome when an optional zero-result retry no longer fits the budget.
 
-    A clean empty response stays a no-results outcome; otherwise the earlier
-    search's own error (interstitial, timeout) is more diagnostic than a
-    generic budget message.
+    A clean empty response stays a no-results outcome with a coverage warning;
+    otherwise the earlier search's own error (interstitial, timeout) is more
+    diagnostic than a generic budget message.
     """
     _log("chain budget exhausted; skipping remaining zero-result retries")
     if last_clean_response is not None:
-        return last_clean_response
+        return {
+            **last_clean_response,
+            "warning": "Partial coverage: optional zero-result retries skipped because the search budget was exhausted.",
+        }
     return response
 
 
