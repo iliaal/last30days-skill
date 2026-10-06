@@ -9,6 +9,7 @@ fabrication as it is parsing.
 import json
 import re
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +17,9 @@ from lib import grok_x
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
+    """Version rejection is exercised separately in test_grok_tool_boundary."""
+    monkeypatch.setattr(grok_x, "_check_cli_version", lambda *args: None)
     grok_x.clear_availability_cache()
     yield
     grok_x.clear_availability_cache()
@@ -184,7 +187,7 @@ def test_non_dict_response_returns_empty():
 # --- invocation contract ---------------------------------------------------
 
 def test_invocation_omits_json_schema_and_tools(monkeypatch):
-    """Both flags degrade or suppress the tool call; neither may be passed."""
+    """Schema constraints suppress X; CLI tool allowlists also gate hosted X."""
     seen = {}
 
     def fake_run(cmd, **kwargs):
@@ -221,9 +224,8 @@ def test_subprocess_runs_in_an_isolated_empty_directory(monkeypatch):
     monkeypatch.setattr(grok_x, "binary_path", lambda: "/usr/bin/grok")
     grok_x.search_x("steipete", *WINDOW)
     assert seen["cwd"] and seen["cwd"] != os.getcwd()
-    # Isolated and near-empty: the only entry is the throwaway HOME staged for
-    # the child, never the user's checkout.
-    assert seen["existed"] and seen["entries"] == ["home"]
+    # Only the throwaway HOME and engine-owned profile enter the child cwd.
+    assert seen["existed"] and sorted(seen["entries"]) == ["home", "x-agent.md"]
 
 
 def test_subprocess_environment_is_minimal(monkeypatch):
@@ -797,6 +799,7 @@ def _capture_prompts(monkeypatch):
     calls = []
 
     def fake_run(cmd, **kwargs):
+        kwargs["agent_profile"] = Path(cmd[cmd.index("--agent") + 1]).read_text()
         calls.append((cmd, kwargs))
         return subprocess.CompletedProcess(cmd, 0, _block("2087568620465607078"), "")
 
@@ -834,24 +837,23 @@ def test_query_literal_keeps_printable_non_ascii_readable():
     assert grok_x._query_literal("東京 café") == '"東京 café"'
 
 
-def test_invocation_strips_every_non_x_builtin_tool(monkeypatch):
-    """The child runs under bypassPermissions with attacker-controlled text in
-    context; shell, file, web, and subagent tools must all be removed. The
-    names are the Grok CLI 1.0.41 tool IDs observed to empty the child's
-    tool_definitions.json."""
+def test_invocation_has_empty_local_tool_profile(monkeypatch):
     calls = _capture_prompts(monkeypatch)
     grok_x.search_x("steipete", *WINDOW)
     cmd = calls[0][0]
     assert "--tools" not in cmd
     assert cmd.count("--disallowed-tools") == 1
     removed = set(cmd[cmd.index("--disallowed-tools") + 1].split(","))
-    assert removed == {
-        "run_terminal_cmd", "monitor", "workflow",
-        "read_file", "write", "search_replace", "grep", "list_dir",
-        "web_search", "web_fetch", "todo_write", "task", "Agent",
-        "search_tool", "use_tool",
-        "image_gen", "image_edit", "image_to_video", "reference_to_video",
-        "enter_plan_mode", "exit_plan_mode", "ask_user_question", "send_feedback",
+    assert removed == {"read_file", "search_tool", "use_tool", "Agent"}
+    profile = json.loads(calls[0][1]["agent_profile"].split("---")[1])
+    assert profile == {
+        "name": "last30days-x",
+        "description": "X search only",
+        "injectDefaultTools": False,
+        "discoverSkills": False,
+        "agentsMd": False,
+        "mcpInheritance": "none",
+        "toolConfig": {"tools": [{"id": "GrokBuild:read_file"}]},
     }
     assert not removed & grok_x._ALLOWED_TOOLS
     assert "--disable-web-search" in cmd

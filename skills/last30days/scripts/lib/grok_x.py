@@ -15,13 +15,14 @@ Invocation constraints, all measured, all load-bearing:
   fields from training data instead. Measured with an interleaved A/B
   controlling for time: plain output returned verified in-window posts on 4 of
   4 calls, `--json-schema` on 1 of 4.
-* **Never pass `--tools`.** Two runs produced no output in 7 minutes and were
-  killed; the identical prompts without it completed normally.
+* **Never use X tool names in `--tools`.** Grok 1.0.46 treats those server-side
+  names as unknown local tools and restores the full local toolset. Empty
+  lists and `--disallowed-tools '*'` also leave local tools enabled.
 * **Never pass `--sandbox strict`.** Under Grok CLI 1.0.41 on WSL2 every
   inference request failed DNS resolution (``/etc/resolv.conf`` links to
   ``/mnt/wsl``, outside the profile's readable system paths) and both attempts
   hit the timeout. The looser profiles leave reads unrestricted, and
-  ``_DISALLOWED_TOOLS`` already leaves the child no filesystem tool.
+  the generated agent profile leaves the audited child no local tools.
 * **Do pass `--output-format json`.** Grok CLI 1.0.5 narrates tool use and
   then fences a JSON array; the field-block parser treats that as empty
   (``no items parsed``). JSON stdout is the CLI's supported way to skip the
@@ -47,7 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import log
+from . import log, usage
 from .relevance import token_overlap_relevance as _compute_relevance
 # One copy of the snowflake, handle-grammar, and generated-sequence helpers
 # lives in x_api; grok_x keeps its private names for its callers and
@@ -743,39 +744,27 @@ _ALLOWED_TOOLS = frozenset({
     "x_user_search",
 })
 
-# Built-in tools stripped from the child via --disallowed-tools (a denylist:
-# --tools hangs, see the module docstring). The child runs under
-# bypassPermissions with attacker-controlled text (the topic and every
-# retrieved post) in context and needs only the X search tools, which run
-# server-side and are unaffected. `monitor` and `workflow` execute commands and
-# `write` creates files, so they belong here as much as the shell tool. Names
-# are Grok CLI 1.0.41 tool IDs; the list fails open for tools a later CLI adds,
-# so re-audit by checking that the child session's tool_definitions.json is empty.
-_DISALLOWED_TOOLS = (
-    "run_terminal_cmd",
-    "monitor",
-    "workflow",
-    "read_file",
-    "write",
-    "search_replace",
-    "grep",
-    "list_dir",
-    "web_search",
-    "web_fetch",
-    "todo_write",
-    "task",
-    "Agent",
-    "search_tool",
-    "use_tool",
-    "image_gen",
-    "image_edit",
-    "image_to_video",
-    "reference_to_video",
-    "enter_plan_mode",
-    "exit_plan_mode",
-    "ask_user_question",
-    "send_feedback",
-)
+# Do not widen this allowlist without probing the resulting local registry,
+# forced local tool calls, and hosted x_search with an isolated fixture server.
+_AUDITED_CLI_BUILDS = frozenset({
+    "grok 1.0.46 (2765805b9442)",
+    "grok 1.0.46 (2765805b9442) [stable]",
+})
+
+# Grok rejects an initially empty toolConfig when injection is disabled. Declare
+# one registered tool, then remove it after initialization via the denylist.
+# A file profile is required: --agents inline does not select this main profile
+# in 1.0.46. Leaving `tools` unset preserves the separate hosted X search lane.
+_X_AGENT_PROFILE = {
+    "name": "last30days-x",
+    "description": "X search only",
+    "injectDefaultTools": False,
+    "discoverSkills": False,
+    "agentsMd": False,
+    "mcpInheritance": "none",
+    "toolConfig": {"tools": [{"id": "GrokBuild:read_file"}]},
+}
+_DISALLOWED_TOOLS = ("read_file", "search_tool", "use_tool", "Agent")
 
 _PROMPT = """Use {tool} with mode Top, limit {limit}, and the X search query given below as a JSON string literal.
 
@@ -848,6 +837,34 @@ def classify_run_failure(detail: str) -> str:
     return health.ERROR
 
 
+def _check_cli_version(binary: str, workdir: str, timeout: float) -> Optional[str]:
+    """Reject unaudited tool registries before credentials enter the child home."""
+    try:
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=min(timeout, 5),
+            cwd=workdir,
+            env=_subprocess_env(os.path.join(workdir, "home")),
+        )
+    except subprocess.TimeoutExpired:
+        return "grok CLI version check timed out"
+    except OSError as exc:
+        return f"could not verify grok CLI version: {type(exc).__name__}: {exc}"
+    if result.returncode != 0:
+        return f"grok CLI version check exited {result.returncode}"
+    if result.stdout.strip() not in _AUDITED_CLI_BUILDS:
+        return (
+            "unsupported grok CLI version; X research requires the audited "
+            "Grok 1.0.46 stable build (2765805b9442). "
+            "Use another X backend until your CLI build is supported."
+        )
+    return None
+
+
 def _invoke(prompt: str, timeout: int) -> Dict[str, Any]:
     """Run `grok` once. Never raises; every failure returns {'error': str}.
 
@@ -858,9 +875,27 @@ def _invoke(prompt: str, timeout: int) -> Dict[str, Any]:
     binary = binary_path()
     if binary is None:
         return {"error": "grok CLI not found on PATH"}
+    # Keep an updater's symlink swap from changing the build after its check.
+    binary = os.path.realpath(binary)
+    deadline = time.monotonic() + timeout
     try:
         with tempfile.TemporaryDirectory(prefix="last30days-grok-") as workdir:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"error": f"grok CLI timed out after {timeout}s"}
+            version_error = _check_cli_version(binary, workdir, remaining)
+            if version_error:
+                return {"error": version_error}
             child_home = _stage_child_home(workdir)
+            agent_file = Path(workdir) / "x-agent.md"
+            agent_file.write_text(
+                "---\n" + json.dumps(_X_AGENT_PROFILE) + "\n---\nUse native X search only.\n",
+                encoding="utf-8",
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"error": f"grok CLI timed out after {timeout}s"}
+            usage.begin("grok")
             result = subprocess.run(
                 [
                     binary,
@@ -870,6 +905,8 @@ def _invoke(prompt: str, timeout: int) -> Dict[str, Any]:
                     "bypassPermissions",
                     "--output-format",
                     "json",
+                    "--agent",
+                    str(agent_file),
                     "--disallowed-tools",
                     ",".join(_DISALLOWED_TOOLS),
                     "--disable-web-search",
@@ -882,7 +919,7 @@ def _invoke(prompt: str, timeout: int) -> Dict[str, Any]:
                 # than an error. Matches the auth-store read above.
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
+                timeout=remaining,
                 cwd=workdir,
                 env=_subprocess_env(child_home),
             )
@@ -891,9 +928,9 @@ def _invoke(prompt: str, timeout: int) -> Dict[str, Any]:
     except subprocess.TimeoutExpired:
         return {"error": f"grok CLI timed out after {timeout}s"}
     except OSError as exc:
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        return {"error": f"grok CLI failed: {type(exc).__name__}: {exc}"}
     except Exception as exc:  # noqa: BLE001 - search_x must never raise
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        return {"error": f"grok CLI failed: {type(exc).__name__}: {exc}"}
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[:300]
@@ -930,7 +967,7 @@ def _run_query(
     The untrusted ``query`` enters the prompt only through ``_query_literal``,
     so quotes and newlines in the topic cannot break out of its framing. The
     model still reads the decoded value, so the DATA ONLY wording is advisory;
-    the hard boundary is ``_DISALLOWED_TOOLS``.
+    the hard boundary is the audited CLI build and the generated agent profile.
     """
     if tool not in _ALLOWED_TOOLS:
         return [], f"unsupported grok tool: {tool}", False
@@ -1007,7 +1044,7 @@ def search_x(
             break
         if error and not items:
             last_error = error
-            if "not found" in error or "timed out" in error or "exited" in error:
+            if "grok CLI" in error or "not found" in error or "timed out" in error or "exited" in error:
                 invocation_failed = True
         for item in items:
             key = item["url"]
