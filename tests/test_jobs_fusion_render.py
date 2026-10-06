@@ -1,4 +1,5 @@
 import copy
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -205,7 +206,11 @@ def test_hiring_analysis_uses_canonical_job_urls(rejected):
     original = jobs[-1]
     variant = copy.deepcopy(original)
     variant.item_id = "other-stream-id"
-    variant.url = original.url.upper() + "/?utm_source=jobs"
+    parts = urlsplit(original.url)
+    variant.url = parts._replace(
+        scheme=parts.scheme.upper(), netloc=parts.netloc.upper(),
+        path=parts.path + "/", query="utm_source=jobs",
+    ).geturl()
     report.items_by_source["jobs"] = [*jobs[:-1], variant]
     assert fusion.candidate_key(original) == fusion.candidate_key(variant)
     if rejected:
@@ -221,3 +226,20 @@ def test_hiring_analysis_uses_canonical_job_urls(rejected):
     assert f"evidence: {4 if rejected else 5} roles" in text
     if rejected:
         assert original.title not in text
+
+
+def test_hiring_analysis_keeps_case_sensitive_job_paths_distinct():
+    jobs = _jobs(5)
+    original = jobs[-1]
+    distinct = copy.deepcopy(original)
+    distinct.item_id = "case-sensitive-role"
+    distinct.title = "Software Engineer, Infrastructure"
+    parts = urlsplit(original.url)
+    distinct.url = parts._replace(path=parts.path.upper()).geturl()
+    report = _report([*jobs, distinct], pool_limit=6)
+
+    assert len(report.ranked_candidates) == 6
+    assert {original.url, distinct.url} <= {
+        candidate.url for candidate in report.ranked_candidates
+    }
+    assert "evidence: 6 roles" in render.render_compact(report)
