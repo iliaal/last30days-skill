@@ -15,7 +15,6 @@ import re
 import signal
 import sqlite3
 import sys
-import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -51,36 +50,33 @@ if os.name == "nt":
 SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from lib import competitors as competitors_mod, corpus, dates, discovery_handoff, env, freshness, html_render, http, permission_preflight, pipeline, reddit, registers, render, schema, ui, x_envelope
+from lib import competitors as competitors_mod, corpus, dates, discovery_handoff, env, freshness, html_render, http, permission_preflight, pipeline, reddit, registers, render, schema, subproc, ui, x_envelope
 
-_child_pids: set[int] = set()
-_child_pids_lock = threading.Lock()
-
-
-def register_child_pid(pid: int) -> None:
-    with _child_pids_lock:
-        _child_pids.add(pid)
+atexit.register(subproc.cleanup_children)
 
 
-def unregister_child_pid(pid: int) -> None:
-    with _child_pids_lock:
-        _child_pids.discard(pid)
+def _on_sigterm(signum, frame) -> None:
+    """SIGTERM handler: clean descendant groups, then die as SIGTERM.
+
+    Every run_with_timeout child runs in its own pgid (lib/subproc.py via
+    os.setsid), so a group kill aimed at the engine can never reach them;
+    only the lib.subproc registry can. atexit never runs on a signal death,
+    so without this handler an MCP timeout would orphan node bird-search,
+    yt-dlp, and the digg CLI. The MCP server SIGTERMs the engine group
+    first, giving this handler room to killpg() each registered child
+    group before the SIGKILL backstop. Restoring the default disposition
+    and re-raising preserves killed-by-SIGTERM semantics for the parent.
+    """
+    subproc.cleanup_children()
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
-def _cleanup_children() -> None:
-    with _child_pids_lock:
-        pids = list(_child_pids)
-    for pid in pids:
-        try:
-            if hasattr(os, "killpg"):
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
-            else:
-                os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            continue
-
-
-atexit.register(_cleanup_children)
+def _install_sigterm_handler() -> None:
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (ValueError, OSError, RuntimeError):
+        pass
 
 
 def parse_meta_ads_page(raw: str) -> str:
@@ -3332,21 +3328,13 @@ def _main(
             config,
             allow_browser_cookies=_setup_allows_browser_cookies(args, extra_argv),
         )
-        # Persist FROM_BROWSER only when every service's cookies came from the
-        # SAME single browser — then we can fast-path future runs to it. If
-        # different services matched different browsers, or none matched, leave
-        # FROM_BROWSER unset so the safe default remains no browser-cookie
-        # reads. We deliberately do NOT pin "auto" here (it would re-probe
-        # Chrome and re-trigger the prompt) nor a single browser (it would
-        # silently skip the service that used the other one).
-        found_browsers = set(results.get("cookies_found", {}).values())
-        from_browser = found_browsers.pop() if len(found_browsers) == 1 else None
-        # Pin only a silent winner (firefox/safari). Pinning a Chromium browser
-        # would make every steady-state run re-read its Keychain-encrypted store
-        # and can re-trigger the "Always Allow" prompt, so Chrome is used for the
-        # first-run scan but never pinned.
-        if from_browser in {"chrome", "brave", "edge", "vivaldi", "opera", "arc", "chromium"}:
-            from_browser = None
+        # Keep only successful browsers, including distinct service winners;
+        # "auto" would also probe browsers that did not supply any cookies.
+        found_browsers = dict.fromkeys(
+            "firefox" if browser == "firefox-wsl" else browser
+            for browser in results.get("cookies_found", {}).values()
+        )
+        from_browser = ",".join(found_browsers) or None
         results["env_written"] = setup_wizard.write_setup_config(
             env.CONFIG_FILE,
             from_browser=from_browser,
@@ -4351,4 +4339,5 @@ def _main(
 
 
 if __name__ == "__main__":
+    _install_sigterm_handler()
     raise SystemExit(main())

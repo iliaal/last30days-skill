@@ -600,12 +600,11 @@ def write_setup_config(
 
     Args:
         env_path: Path to the .env file (e.g. ~/.config/last30days/.env)
-        from_browser: Browser extraction mode to persist. Pass the browser that
-            actually yielded cookies (e.g. "firefox") to fast-path future runs.
-            Pass None (default) to NOT pin FROM_BROWSER — the steady-state
-            default (Firefox/Safari, no Keychain prompt) then applies. We avoid
-            persisting "auto" because it makes every later run probe Chrome and
-            re-trigger the Keychain prompt.
+        from_browser: Browser or comma-separated browser list that actually
+            yielded cookies after consent (e.g. "chrome,firefox"). Pass None
+            (default) to leave FROM_BROWSER unchanged; when unset, future runs
+            do not read native browser stores. Avoid "auto", which would also probe
+            browsers that did not supply cookies during setup.
         browser_consent: Record the user's current cookie-access decision.
             None preserves any previous decision.
 
