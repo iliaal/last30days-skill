@@ -111,6 +111,12 @@ func Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	if err := subCtx.Err(); err != nil {
+		return &RunResult{
+			ExitCode: -1,
+			TimedOut: errors.Is(err, context.DeadlineExceeded),
+		}, fmt.Errorf("engine: subprocess not started: %w", err)
+	}
 	if err := cmd.Start(); err != nil {
 		res := &RunResult{
 			Stdout:   stdout.Bytes(),
@@ -141,17 +147,21 @@ func Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
 		err = werr
 	}
 
+	ctxErr := subCtx.Err()
 	res := &RunResult{
 		Stdout:   stdout.Bytes(),
 		Stderr:   stderr.Bytes(),
 		ExitCode: 0,
-		TimedOut: errors.Is(subCtx.Err(), context.DeadlineExceeded),
+		TimedOut: errors.Is(ctxErr, context.DeadlineExceeded),
 	}
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()
 	}
 	if res.TimedOut {
-		return res, fmt.Errorf("engine: subprocess exceeded %s timeout", timeout)
+		return res, fmt.Errorf("engine: subprocess exceeded %s timeout: %w", timeout, ctxErr)
+	}
+	if ctxErr != nil {
+		return res, fmt.Errorf("engine: subprocess canceled: %w", ctxErr)
 	}
 	if err == nil {
 		return res, nil

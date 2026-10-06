@@ -79,6 +79,74 @@ class TestRunWithTimeout(unittest.TestCase):
                 timeout=1,
             )
 
+    @unittest.skipIf(IS_WINDOWS, "process groups are POSIX-only")
+    def test_timeout_kills_grandchild_after_leader_exits(self):
+        import pathlib
+        import signal
+        import sys
+        import tempfile
+        import time
+
+        child = """
+import os, pathlib, signal, sys, time
+if sys.argv[2] == "ignore":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+time.sleep(15)
+"""
+        leader = """
+import signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+subprocess.Popen([sys.executable, "-c", *sys.argv[1:]],
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(15)
+"""
+
+        def running(pid):
+            try:
+                real_os.kill(pid, 0)
+                if sys.platform.startswith("linux"):
+                    state = pathlib.Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()[0]
+                    return state != "Z"
+                return True
+            except (ProcessLookupError, FileNotFoundError):
+                return False
+
+        for mode in ("default", "ignore"):
+            with self.subTest(term_handler=mode), tempfile.TemporaryDirectory() as tmp:
+                pidfile = pathlib.Path(tmp, "grandchild.pid")
+
+                def wait_ready(pid):
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        if pidfile.exists() and pidfile.stat().st_size:
+                            return
+                        time.sleep(0.01)
+
+                try:
+                    started = time.monotonic()
+                    with self.assertRaises(subproc.SubprocTimeout):
+                        subproc.run_with_timeout(
+                            [sys.executable, "-c", leader, child, str(pidfile), mode],
+                            timeout=0.1,
+                            on_pid=wait_ready,
+                        )
+                    self.assertLess(time.monotonic() - started, 9)
+                    pid = int(pidfile.read_text())
+                    deadline = time.monotonic() + 1
+                    while running(pid) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertFalse(running(pid), "grandchild survived the leader's clean TERM exit")
+                    self.assertEqual(subproc._child_pids, set())
+                finally:
+                    if pidfile.exists() and pidfile.stat().st_size:
+                        pid = int(pidfile.read_text())
+                        if running(pid):
+                            try:
+                                real_os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+
     def test_missing_command_raises_oserror(self):
         """Missing executables raise FileNotFoundError (or PermissionError on
         some filesystems if a same-named junk file exists)."""

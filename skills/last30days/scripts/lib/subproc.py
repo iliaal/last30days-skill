@@ -174,25 +174,24 @@ def run_with_timeout(
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            term_deadline = time.monotonic() + 5
+            pgid = None
             try:
-                if hasattr(os, "killpg") and hasattr(os, "getpgid"):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                if preexec is not None and hasattr(os, "killpg"):
+                    pgid = proc.pid
+                    os.killpg(pgid, signal.SIGTERM)
                 else:
                     proc.kill()
             except (ProcessLookupError, PermissionError, OSError, AttributeError):
+                pgid = None
                 proc.kill()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 # Child ignored SIGTERM (or our killpg lost the race); escalate.
-                # Guard killpg/getpgid the same way the SIGTERM path above does:
-                # they are POSIX-only and raise AttributeError on Windows. The
-                # primary path was hardened in #552; this mirrors that guard on the
-                # escalation path (added later in #433) so the same crash can't
-                # re-surface here (#588).
                 try:
-                    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    if pgid is not None:
+                        os.killpg(pgid, signal.SIGKILL)
                     else:
                         proc.kill()
                 except (ProcessLookupError, PermissionError, OSError, AttributeError):
@@ -201,6 +200,16 @@ def run_with_timeout(
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass  # process unkillable (e.g. D-state); leave as zombie
+            else:
+                if pgid is not None:
+                    # Reaping the leader does not end its process group. Keep
+                    # the remaining members inside the original TERM grace.
+                    while _signal_group(pgid, 0):
+                        remaining = term_deadline - time.monotonic()
+                        if remaining <= 0:
+                            _signal_group(pgid, signal.SIGKILL)
+                            break
+                        time.sleep(min(_CLEANUP_POLL_SECONDS, remaining))
             raise SubprocTimeout(f"Command {cmd[0]} timed out after {timeout}s")
     finally:
         unregister_child_pid(proc.pid)

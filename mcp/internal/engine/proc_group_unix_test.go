@@ -16,6 +16,70 @@ import (
 	"time"
 )
 
+func TestRunParentCancellationIsNotSuccess(t *testing.T) {
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	stub := filepath.Join(dir, "python3-cancel-stub.sh")
+	script := `#!/bin/sh
+trap 'printf "canceled cleanly\n" >&2; exit 0' TERM
+printf 'partial research\n'
+: > "$RUN_CANCEL_READY"
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readyCh := make(chan error, 1)
+	go func() {
+		deadline := time.NewTimer(3 * time.Second)
+		defer deadline.Stop()
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-tick.C:
+				if _, err := os.Stat(ready); err == nil {
+					readyCh <- nil
+					cancel()
+					return
+				}
+			case <-deadline.C:
+				readyCh <- errors.New("child did not install its SIGTERM handler")
+				cancel()
+				return
+			}
+		}
+	}()
+
+	started := time.Now()
+	res, err := Run(ctx, RunOptions{
+		PythonPath: stub,
+		CacheDir:   stageCache(t),
+		Timeout:    10 * time.Second,
+		ExtraEnv:   []string{"RUN_CANCEL_READY=" + ready},
+	})
+	if readyErr := <-readyCh; readyErr != nil {
+		t.Fatal(readyErr)
+	}
+	if time.Since(started) > 4*time.Second {
+		t.Error("parent cancellation exceeded the bounded shutdown grace")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run error = %v, want context.Canceled after clean child exit", err)
+	}
+	if res == nil {
+		t.Fatal("Run result is nil; want partial output alongside cancellation")
+	}
+	if res.ExitCode != 0 || res.TimedOut {
+		t.Errorf("Run result = %+v, want clean exit without timeout", res)
+	}
+	if string(res.Stdout) != "partial research\n" || !strings.Contains(string(res.Stderr), "canceled cleanly") {
+		t.Errorf("partial output lost: stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+}
+
 func TestRunTimeoutBoundsInheritedPipes(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {

@@ -1,1 +1,1 @@
-Bound MCP output-pipe draining after engine shutdown so detached helpers cannot delay timeout responses indefinitely. A timed-out engine now reports an error even when its signal handler exits successfully.
+Bound MCP output-pipe draining after engine shutdown so detached helpers cannot delay timeout responses indefinitely. Canceled and timed-out requests now report their context error even when the engine's signal handler exits successfully, and requests canceled before startup do not launch the engine.

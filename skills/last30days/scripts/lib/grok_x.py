@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import log
+from . import log, usage
 from .relevance import token_overlap_relevance as _compute_relevance
 # One copy of the snowflake, handle-grammar, and generated-sequence helpers
 # lives in x_api; grok_x keeps its private names for its callers and
@@ -792,6 +792,7 @@ def _invoke(prompt: str, timeout: int) -> Dict[str, Any]:
     try:
         with tempfile.TemporaryDirectory(prefix="last30days-grok-") as workdir:
             child_home = _stage_child_home(workdir)
+            usage.begin("grok")
             result = subprocess.run(
                 [
                     binary,

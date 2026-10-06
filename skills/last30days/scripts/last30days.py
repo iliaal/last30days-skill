@@ -636,7 +636,7 @@ def persist_report(report: schema.Report, store_db: Path | None = None) -> dict[
         store.init_db()
         if private_corpus:
             store.ensure_private_db_files()
-        topic_row = store.add_topic(report.topic)
+        topic_row = store.add_topic(report.topic, update_existing=False)
         topic_id = topic_row["id"]
         source_mode = ",".join(sorted(report.items_by_source)) or "v3"
         run_id = store.record_run(topic_id, source_mode=source_mode, status="running")
@@ -771,6 +771,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-browser-cookies", action="store_true",
                         help="Disable browser-cookie extraction even when FROM_BROWSER is configured")
     parser.add_argument("--save-dir", help="Optional directory for saving the rendered output")
+    parser.add_argument(
+        "--resolve-save-dir", action="store_true",
+        help="Print the skill save directory from flags/config, then exit without research",
+    )
     parser.add_argument(
         "--corpus",
         action="append",
@@ -3179,6 +3183,9 @@ def _main(
     topic = " ".join(args.topic).strip()
     original_topic = topic
     _validate_extra_argv(parser, topic, extra_argv)
+    if args.resolve_save_dir:
+        print(env.resolve_memory_dir(args.save_dir))
+        return 0
     if args.x_posts is not None and _looks_inline_json(args.x_posts):
         sys.stderr.write(
             "[last30days] --x-posts accepts a file path only (inline JSON is not "
@@ -3336,8 +3343,16 @@ def _main(
         # first-run scan but never pinned.
         if from_browser in {"chrome", "brave", "edge", "vivaldi", "opera", "arc", "chromium"}:
             from_browser = None
-        setup_wizard.write_setup_config(env.CONFIG_FILE, from_browser=from_browser)
-        results["env_written"] = True
+        results["env_written"] = setup_wizard.write_setup_config(
+            env.CONFIG_FILE,
+            from_browser=from_browser,
+            browser_consent=(
+                None if args.diagnose else _setup_allows_browser_cookies(args, extra_argv)
+            ),
+        )
+        if not results["env_written"]:
+            sys.stderr.write("Setup configuration could not be fully saved; some settings may already be saved.\n")
+            return 1
         sys.stderr.write(setup_wizard.get_setup_status_text(results) + "\n")
         return 0
 
