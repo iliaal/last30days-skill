@@ -765,6 +765,47 @@ def test_add_topic_with_search_queries(temp_db):
     assert json.loads(topic["search_queries"]) == ["query1", "query2"]
 
 
+def test_persist_report_preserves_existing_watchlist_settings(temp_db, sample_report):
+    import last30days as cli
+
+    topic = store.add_topic(
+        sample_report.topic,
+        search_queries=["custom research query"],
+        schedule="0 8 * * 1",
+    )
+    before = store.get_topic(sample_report.topic)
+
+    counts = cli.persist_report(sample_report, store_db=temp_db)
+
+    after = store.get_topic(sample_report.topic)
+    assert after == before
+    assert after["id"] == topic["id"]
+    assert counts["new"] > 0
+    assert store.get_new_findings(topic["id"])
+
+
+def test_persist_report_creates_a_missing_watchlist_topic(temp_db, sample_report):
+    import last30days as cli
+
+    assert store.get_topic(sample_report.topic) is None
+
+    counts = cli.persist_report(sample_report, store_db=temp_db)
+
+    topic = store.get_topic(sample_report.topic)
+    assert topic["schedule"] == "0 8 * * *"
+    assert counts["new"] > 0
+
+
+def test_add_topic_still_updates_explicit_watchlist_configuration(temp_db):
+    first = store.add_topic("Configured topic", search_queries=["old"], schedule="0 8 * * 1")
+
+    updated = store.add_topic("Configured topic", search_queries=["new"], schedule="0 9 * * 2")
+
+    assert updated["id"] == first["id"]
+    assert json.loads(updated["search_queries"]) == ["new"]
+    assert updated["schedule"] == "0 9 * * 2"
+
+
 def test_remove_topic_cascades_findings(temp_db, sample_report):
     """Test that removing a topic deletes its findings and runs."""
     topic = store.add_topic("Test Topic")
