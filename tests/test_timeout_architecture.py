@@ -4,10 +4,11 @@ import queue
 import threading
 import time
 from unittest import mock
+from uuid import uuid4
 
 import pytest
 
-from lib import health, http, pipeline, schema, xai_x
+from lib import health, http, pipeline, render, schema, xai_x
 
 
 def test_stream_timeouts_are_bounded():
@@ -482,4 +483,84 @@ def test_bird_budget_stop_keeps_clean_empty_outcome(monkeypatch):
         "multi word agent topic", "2026-08-01", "2026-08-31", deadline=deadline,
     )
     assert len(calls) == 1, "zero-result retries must not start past the deadline"
-    assert response == {"items": []}, f"clean no-results must not become an error: {response}"
+    assert response == {
+        "items": [],
+        "warning": "Partial coverage: optional zero-result retries skipped because the search budget was exhausted.",
+    }, f"clean no-results must carry a coverage warning without an error: {response}"
+
+
+@pytest.mark.parametrize("entrypoint", ["research", "discovery"])
+@pytest.mark.parametrize("outcome", ["budget-stop", "complete", "first-failure"])
+def test_bird_budget_warning_reaches_report(monkeypatch, entrypoint, outcome):
+    topic = f"Widget compiler development {uuid4().hex}"
+    now = [1000.0]
+    calls = []
+    config = {
+        "LAST30DAYS_X_BACKEND": "bird", "AUTH_TOKEN": "dummy", "CT0": "dummy",
+        "_research_deadline": 1005.0,
+    }
+    plan = schema.QueryPlan(
+        raw_topic=topic, intent="opinion", freshness_mode="balanced_recent",
+        cluster_mode="debate", source_weights={"x": 1.0},
+        subqueries=[schema.SubQuery(
+            label="primary", search_query=topic, ranking_query=topic, sources=["x"],
+        )],
+    )
+    runtime = schema.ProviderRuntime(
+        reasoning_provider="native", planner_model="", rerank_model="",
+        x_search_backend="bird",
+    )
+
+    def bird_search(query, count, timeout, deadline=None, **kwargs):
+        calls.append((query, timeout, deadline))
+        if outcome != "complete":
+            now[0] = deadline - 0.5
+        if outcome == "first-failure":
+            return {"items": [], "error": "Invalid JSON response (anti-bot interstitial)"}
+        return {"items": []}
+
+    monkeypatch.setattr(pipeline.providers, "resolve_runtime", lambda *a: (runtime, None))
+    monkeypatch.setattr(pipeline, "available_sources", lambda *a, **k: ["x"])
+    monkeypatch.setattr(pipeline.env, "_x_backend_available", lambda backend, *a: backend == "bird")
+    monkeypatch.setattr(pipeline.planner, "plan_query", lambda **k: plan)
+    monkeypatch.setattr(pipeline.bird_x, "_run_bird_search", bird_search)
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    assert pipeline.env.x_backend_chain(config) == ["bird"]
+
+    if entrypoint == "discovery":
+        report = pipeline.run_discover(
+            domain=topic, config=config, depth="quick", requested_sources=["x"],
+        )
+        compact = render.render_discovery(report)
+        assert report.topics == []
+    else:
+        report = pipeline.run(
+            topic=topic, config=config, depth="quick", requested_sources=["x"],
+            internal_subrun=True,
+        )
+        compact = render.render_compact(report)
+        assert report.items_by_source.get("x", []) == []
+        if outcome == "first-failure":
+            assert "Invalid JSON response" in report.errors_by_source["x"]
+        else:
+            assert report.errors_by_source == {}
+
+    receipts = [warning for warning in report.warnings if "search budget" in warning]
+    if outcome == "budget-stop":
+        assert len(calls) == 1
+        assert calls[0][1:] == (5, 1005.0)
+        assert report.source_status["x"].state == schema.NO_RESULTS
+        assert receipts == [
+            "X: bird Partial coverage: optional zero-result retries skipped because the search budget was exhausted."
+        ]
+        assert receipts[0] in compact
+    elif outcome == "complete":
+        assert len(calls) > 1
+        assert report.source_status["x"].state == schema.NO_RESULTS
+        assert receipts == []
+        assert "search budget" not in compact
+    else:
+        assert len(calls) == 1
+        assert report.source_status["x"].state == health.SCHEMA_DRIFT
+        assert "Invalid JSON response" in report.source_status["x"].detail
+        assert receipts == []

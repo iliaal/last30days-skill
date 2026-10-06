@@ -1768,7 +1768,10 @@ def run_discover(
         plan=plan,
         topics=topics,
         source_status=source_status,
-        warnings=_discovery_report_warnings(topics, outcome, source_status),
+        warnings=(
+            _discovery_report_warnings(topics, outcome, source_status)
+            + sweep.bundle.artifacts.get("x_partial_coverage", [])
+        ),
         outcome=outcome,
         weak_signal=weak_signal[1] if weak_signal and not topics else None,
     )
@@ -4753,8 +4756,8 @@ def _fetch_x_backend(backend, query, from_date, to_date, depth, config, warnings
     """Fetch X items from a single backend. Returns (items, error_str).
 
     ``warnings``, when given, collects backend receipts that are not
-    failures (xapi's "window truncated to 7 days" after the recent-search
-    fallback) so the X branch can surface them as run artifacts.
+    failures (Bird's skipped optional retries or xapi's recent-search window
+    truncation) so the X branch can surface them as run artifacts.
     ``deadline`` is the chain's shared ``time.monotonic()`` budget; backends
     that accept one (bird/grok/xai/xurl/xquik/xapi) clamp their waits to the
     time left.
@@ -4799,13 +4802,13 @@ def _fetch_x_backend(backend, query, from_date, to_date, depth, config, warnings
     elif backend == "xapi":
         result = x_api.search_x(config.get("X_BEARER_TOKEN") or "", query, from_date, to_date, depth=depth, deadline=deadline, cancel=cancel)
         items = result.get("items", []) if isinstance(result, dict) else []
-        warning = result.get("warning") if isinstance(result, dict) else None
-        if warning:
-            print(f"[X] xapi: {warning}", file=sys.stderr)
-            if warnings is not None:
-                warnings.append(f"X: xapi {warning}")
     else:
         return [], f"unknown X backend: {backend}"
+    warning = result.get("warning") if isinstance(result, dict) else None
+    if warning:
+        print(f"[X] {backend}: {warning}", file=sys.stderr)
+        if warnings is not None:
+            warnings.append(f"X: {backend} {warning}")
     err = result.get("error") if isinstance(result, dict) else ""
     return items, (err or "")
 
