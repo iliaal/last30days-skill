@@ -247,6 +247,39 @@ func TestRunTimesOut(t *testing.T) {
 	if !strings.Contains(err.Error(), "timeout") {
 		t.Fatalf("error %q lacks 'timeout' marker", err)
 	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestRunCanceledBeforeStart(t *testing.T) {
+	for _, wantErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(wantErr.Error(), func(t *testing.T) {
+			expired := wantErr == context.DeadlineExceeded
+			ctx, cancel := context.WithCancel(context.Background())
+			if expired {
+				cancel()
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			}
+			cancel()
+			cache := stageCache(t)
+			// A missing executable exposes an attempted start even when a
+			// valid child would be killed before it could write output.
+			res, err := Run(ctx, RunOptions{
+				PythonPath: filepath.Join(cache, "must-not-start"),
+				CacheDir:   cache,
+			})
+			if !errors.Is(err, wantErr) {
+				t.Errorf("Run error = %v, want %v", err, wantErr)
+			}
+			if res == nil {
+				t.Fatal("Run result is nil; want a canceled result")
+			}
+			if res.TimedOut != expired || res.ExitCode != -1 || len(res.Stdout) != 0 {
+				t.Errorf("Run result = %+v, want no started subprocess and TimedOut=%v", res, expired)
+			}
+		})
+	}
 }
 
 func TestResolvePythonHonorsEnvOverride(t *testing.T) {

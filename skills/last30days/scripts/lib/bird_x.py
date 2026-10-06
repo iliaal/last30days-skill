@@ -345,39 +345,43 @@ def _invoke_bird_subprocess(query: str, count: int, timeout: int):
         "--json",
     ]
 
-    pid_holder: list[int] = []
-
-    def _register(pid: int) -> None:
-        pid_holder.append(pid)
-        try:
-            from last30days import register_child_pid
-            register_child_pid(pid)
-        except ImportError:
-            pass
-
     try:
         result = subproc.run_with_timeout(
             cmd,
             timeout=timeout,
             env=_subprocess_env(),
-            on_pid=_register,
         )
     except subproc.SubprocTimeout:
         return None, {"error": f"Search timed out after {timeout}s", "items": []}
     except Exception as e:
         return None, {"error": str(e), "items": []}
-    finally:
-        if pid_holder:
-            try:
-                from last30days import unregister_child_pid
-                unregister_child_pid(pid_holder[0])
-            except Exception:
-                pass
 
     return result, None
 
 
-def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
+def _invalid_json_error(
+    attempts: int,
+    decode_error: Optional[str],
+    budget_exhausted: bool = False,
+) -> Dict[str, Any]:
+    noun = "attempt" if attempts == 1 else "attempts"
+    skipped = ", retry skipped: chain budget exhausted" if budget_exhausted else ""
+    return {
+        "error": (
+            f"Invalid JSON response after {attempts} {noun}{skipped} "
+            f"(likely Twitter anti-bot interstitial): {decode_error}"
+        ),
+        "items": [],
+    }
+
+
+def _run_bird_search(
+    query: str,
+    count: int,
+    timeout: int,
+    deadline: Optional[float] = None,
+    cancel: Any = None,
+) -> Dict[str, Any]:
     """Run a search using the vendored bird-search.mjs module.
 
     Retries the subprocess on JSON-decode failure (typically a Twitter
@@ -390,14 +394,27 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
         query: Full search query string (including since: filter)
         count: Number of results to request
         timeout: Timeout in seconds (per attempt)
+        deadline: Optional shared ``time.monotonic()`` deadline. A decode
+            retry runs only when the delay plus at least one second of
+            subprocess time still fits; its timeout is re-clamped after the
+            delay.
 
     Returns:
         Raw Bird JSON response or error dict.
     """
     last_decode_error: Optional[str] = None
+    attempt_timeout: Optional[int] = timeout
 
     for attempt in range(MAX_JSON_DECODE_RETRIES):
-        result, terminal_error = _invoke_bird_subprocess(query, count, timeout)
+        if cancel is not None and cancel.is_set():
+            return {"error": "bird: research cancelled", "items": []}
+        if attempt > 0:
+            attempt_timeout = _clamped_bird_timeout(timeout, deadline)
+            if attempt_timeout is None:
+                return _invalid_json_error(
+                    attempt, last_decode_error, budget_exhausted=True,
+                )
+        result, terminal_error = _invoke_bird_subprocess(query, count, attempt_timeout)
         if terminal_error is not None:
             return terminal_error
 
@@ -431,21 +448,29 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
             )
             last_decode_error = str(e)
             if attempt_num < MAX_JSON_DECODE_RETRIES:
+                if deadline is not None and (
+                    deadline - time.monotonic() < JSON_DECODE_RETRY_DELAY + 1
+                ):
+                    log.source_log(
+                        "X/bird",
+                        f"{log_msg}; retry skipped, chain budget exhausted",
+                        tty_only=False,
+                    )
+                    return _invalid_json_error(
+                        attempt_num, last_decode_error, budget_exhausted=True,
+                    )
                 log.source_log(
                     "X/bird",
                     f"{log_msg}; retrying in {JSON_DECODE_RETRY_DELAY:.0f}s",
                     tty_only=False,
                 )
-                time.sleep(JSON_DECODE_RETRY_DELAY)
+                if cancel is not None:
+                    cancel.wait(JSON_DECODE_RETRY_DELAY)
+                else:
+                    time.sleep(JSON_DECODE_RETRY_DELAY)
                 continue
             log.source_log("X/bird", log_msg, tty_only=False)
-            return {
-                "error": (
-                    f"Invalid JSON response after {MAX_JSON_DECODE_RETRIES} attempts "
-                    f"(likely Twitter anti-bot interstitial): {e}"
-                ),
-                "items": [],
-            }
+            return _invalid_json_error(attempt_num, last_decode_error)
 
         if isinstance(parsed, list):
             return {"items": parsed}
@@ -458,11 +483,43 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
     }
 
 
+def _clamped_bird_timeout(base: int, deadline: Optional[float]) -> Optional[int]:
+    """Per-attempt timeout clamped to the chain's remaining budget.
+
+    Returns None when the deadline already passed so the caller skips the
+    subprocess instead of starting a call guaranteed to overrun the chain.
+    """
+    if deadline is None:
+        return base
+    remaining = deadline - time.monotonic()
+    if remaining < 1:
+        return None
+    return max(1, min(base, int(remaining)))
+
+
+def _budget_stop(
+    response: Dict[str, Any],
+    last_clean_response: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Outcome when an optional zero-result retry no longer fits the budget.
+
+    A clean empty response stays a no-results outcome; otherwise the earlier
+    search's own error (interstitial, timeout) is more diagnostic than a
+    generic budget message.
+    """
+    _log("chain budget exhausted; skipping remaining zero-result retries")
+    if last_clean_response is not None:
+        return last_clean_response
+    return response
+
+
 def search_x(
     topic: str,
     from_date: str,
     to_date: str,
     depth: str = "default",
+    deadline: Optional[float] = None,
+    cancel: Any = None,
 ) -> Dict[str, Any]:
     """Search X using Bird CLI with automatic retry on 0 results.
 
@@ -471,12 +528,20 @@ def search_x(
         from_date: Start date (YYYY-MM-DD)
         to_date: Inclusive end date (YYYY-MM-DD)
         depth: Research depth - "quick", "default", or "deep"
+        deadline: Optional shared wall-clock deadline (``time.monotonic()``
+            instant) from the X backend chain. Each of the up-to-four
+            sequential searches clamps its per-attempt timeout to the time
+            left; searches past the deadline never start.
 
     Returns:
         Raw Bird JSON response or error dict.
     """
     count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
-    timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
+    cancel_kwargs = {"cancel": cancel} if cancel is not None else {}
+    base_timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
+    timeout = _clamped_bird_timeout(base_timeout, deadline)
+    if timeout is None:
+        return {"error": "bird: chain budget exhausted", "items": []}
 
     # Extract core subject - X search is literal, not semantic
     core_subject = _extract_core_subject(topic)
@@ -486,7 +551,7 @@ def search_x(
     date_filters = _date_filters(from_date, to_date)
 
     _log(f"Searching: {query}")
-    response = _run_bird_search(query, count, timeout)
+    response = _run_bird_search(query, count, timeout, deadline=deadline, **cancel_kwargs)
     last_clean_response = response if not response.get("error") else None
 
     # Check if we got results
@@ -501,7 +566,10 @@ def search_x(
             or_parts = ' OR '.join(f'"{t}"' for t in compounds[:3])
             _log(f"0 results for '{core_topic}', retrying with OR groups: {or_parts}")
             query = f"({or_parts}) {date_filters}"
-            response = _run_bird_search(query, count, timeout)
+            timeout = _clamped_bird_timeout(base_timeout, deadline)
+            if timeout is None:
+                return _budget_stop(response, last_clean_response)
+            response = _run_bird_search(query, count, timeout, deadline=deadline, **cancel_kwargs)
             if not response.get("error"):
                 last_clean_response = response
             items = parse_bird_response(response, query=core_topic)
@@ -511,7 +579,10 @@ def search_x(
         shorter = ' '.join(core_words[:2])
         _log(f"0 results for '{core_topic}', retrying with '{shorter}'")
         query = f"{shorter} {date_filters}"
-        response = _run_bird_search(query, count, timeout)
+        timeout = _clamped_bird_timeout(base_timeout, deadline)
+        if timeout is None:
+            return _budget_stop(response, last_clean_response)
+        response = _run_bird_search(query, count, timeout, deadline=deadline, **cancel_kwargs)
         if not response.get("error"):
             last_clean_response = response
         items = parse_bird_response(response, query=core_topic)
@@ -536,10 +607,15 @@ def search_x(
             retry_terms = anchor if strongest == anchor else f"{anchor} {strongest}"
             _log(f"0 results for '{core_topic}', retrying anchored on '{retry_terms}'")
             query = f"{retry_terms} {date_filters}"
-            response = _run_bird_search(query, count, timeout)
+            timeout = _clamped_bird_timeout(base_timeout, deadline)
+            if timeout is None:
+                return _budget_stop(response, last_clean_response)
+            response = _run_bird_search(query, count, timeout, deadline=deadline, **cancel_kwargs)
             if not response.get("error"):
                 last_clean_response = response
 
+    if cancel is not None and cancel.is_set():
+        return {**response, "error": "bird: research cancelled"}
     if response.get("error") and last_clean_response is not None:
         _log("Optional retry failed after a clean empty response; preserving no-results outcome")
         return last_clean_response
@@ -554,6 +630,8 @@ def search_handles(
     failure_out: Optional[List[str]] = None,
     *,
     to_date: Optional[str] = None,
+    deadline: Optional[float] = None,
+    cancel: Any = None,
 ) -> List[Dict[str, Any]]:
     """Search specific X handles for topic-related content.
 
@@ -584,6 +662,10 @@ def search_handles(
             failure_out.append(msg)
 
     def _search_one_handle(handle: str) -> List[Dict[str, Any]]:
+        timeout = _clamped_bird_timeout(15, deadline)
+        if timeout is None or (cancel is not None and cancel.is_set()):
+            _note("bird handle research cancelled or timed out")
+            return []
         handle = handle.lstrip("@")
         # Always unfiltered: pull the timeline, rank by topic relevance below.
         query = f"from:{handle} {date_filters}"
@@ -596,7 +678,7 @@ def search_handles(
         ]
 
         try:
-            result = subproc.run_with_timeout(cmd, timeout=15, env=_subprocess_env())
+            result = subproc.run_with_timeout(cmd, timeout=timeout, env=_subprocess_env())
         except subproc.SubprocTimeout:
             _log(f"Handle search timed out for @{handle}")
             _note(f"@{handle}: bird-search timed out after 15s")
@@ -651,6 +733,8 @@ def search_mentions(
     failure_out: Optional[List[str]] = None,
     *,
     to_date: Optional[str] = None,
+    deadline: Optional[float] = None,
+    cancel: Any = None,
 ) -> List[Dict[str, Any]]:
     """Search for tweets ABOUT/TO each handle — the mention lane.
 
@@ -678,6 +762,10 @@ def search_mentions(
             failure_out.append(msg)
 
     def _search_one(handle: str) -> List[Dict[str, Any]]:
+        timeout = _clamped_bird_timeout(15, deadline)
+        if timeout is None or (cancel is not None and cancel.is_set()):
+            _note("bird mention research cancelled or timed out")
+            return []
         handle = handle.lstrip("@")
         query = f"@{handle} {date_filters}"
         cmd = [
@@ -687,7 +775,7 @@ def search_mentions(
             "--json",
         ]
         try:
-            result = subproc.run_with_timeout(cmd, timeout=15, env=_subprocess_env())
+            result = subproc.run_with_timeout(cmd, timeout=timeout, env=_subprocess_env())
         except subproc.SubprocTimeout:
             _log(f"Mention search timed out for @{handle}")
             _note(f"@{handle}: bird-search timed out after 15s")

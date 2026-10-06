@@ -581,7 +581,7 @@ class TestStrongestTokenRetryAnchored(unittest.TestCase):
 
         queries = []
 
-        def fake_run(query, count, timeout):
+        def fake_run(query, count, timeout, deadline=None):
             queries.append(query)
             return {"items": []}  # always 0 → forces every retry tier
 
@@ -603,7 +603,7 @@ class TestStrongestTokenRetryAnchored(unittest.TestCase):
 
         queries = []
 
-        def fake_run(query, count, timeout):
+        def fake_run(query, count, timeout, deadline=None):
             queries.append(query)
             return {"items": []}
 
@@ -622,7 +622,7 @@ class TestBirdRetryQueryCorrectness(unittest.TestCase):
 
         queries = []
 
-        def fake_run(query, count, timeout):
+        def fake_run(query, count, timeout, deadline=None):
             queries.append(query)
             if len(queries) == 1:
                 return {"items": []}

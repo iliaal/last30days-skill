@@ -7,6 +7,7 @@ bookmarks). Requires an API key from xquik.com.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -79,6 +80,8 @@ def search_xquik(
     to_date: str,
     depth: str = "default",
     token: str = "",
+    deadline: float | None = None,
+    cancel: Any = None,
 ) -> Dict[str, Any]:
     """Search X via Xquik REST API.
 
@@ -88,6 +91,10 @@ def search_xquik(
         to_date: End date (YYYY-MM-DD)
         depth: Research depth - "quick", "default", or "deep"
         token: Xquik API key
+        deadline: Optional shared wall-clock deadline (``time.monotonic()``
+            instant) from the X backend chain. Queries past the deadline are
+            never started; the per-request timeout/retry pair still bounds
+            each call (mirrors ``x_api``'s TIMEOUT_SECONDS/RETRIES pattern).
 
     Returns:
         Dict with "items" list and optional "error" string.
@@ -101,12 +108,17 @@ def search_xquik(
     seen_ids: set[str] = set()
 
     for query_text in queries:
+        if (cancel is not None and cancel.is_set()) or (deadline is not None and time.monotonic() >= deadline):
+            _log("chain deadline reached; skipping remaining queries")
+            return {"items": all_items, "error": "Xquik research cancelled or timed out"}
         q = f"{query_text} since:{from_date} until:{to_date}"
         items, auth_error = _execute_search(
             q, cfg["limit"], token,
             label=query_text, id_prefix="XQ",
             seen_ids=seen_ids, relevance_query=query_text,
             index_offset=len(all_items),
+            deadline_monotonic=deadline,
+            cancel=cancel,
         )
         if auth_error:
             # Auth/payment failure is fatal for the whole source (e.g. 401/403,
@@ -115,6 +127,8 @@ def search_xquik(
             return {"items": [], "error": auth_error}
         all_items.extend(items)
 
+    if (cancel is not None and cancel.is_set()) or (deadline is not None and time.monotonic() >= deadline):
+        return {"items": all_items, "error": "Xquik research cancelled or timed out"}
     return {"items": all_items}
 
 
@@ -128,7 +142,9 @@ def _execute_search(
     seen_ids: set[str],
     relevance_query: str,
     index_offset: int = 0,
+    deadline_monotonic: float | None = None,
     failure_out: Optional[List[str]] = None,
+    cancel: Any = None,
 ) -> tuple[List[Dict[str, Any]], str | None]:
     """Run one Xquik search call and parse its tweets.
 
@@ -144,12 +160,18 @@ def _execute_search(
     handle lanes that differs from the search query (``from:handle``).
     ``index_offset`` keeps item ids unique across multiple calls that share an
     accumulator (multi-query topic search, per-handle lanes).
+    ``deadline_monotonic`` bounds the request including retries at the
+    transport (mirrors ``x_api._get``).
     """
     full_url = f"{_BASE_URL}/x/tweets/search?q={_url_encode(q)}&queryType=Top&limit={limit}"
     _log(f"Searching: {label}")
     try:
         request_headers = {"X-Api-Key": token}
-        response = http.get(full_url, headers=request_headers, timeout=30, retries=2)
+        response = http.get(
+            full_url, headers=request_headers, timeout=30, retries=2,
+            deadline_monotonic=deadline_monotonic,
+            cancel=cancel,
+        )
     except http.HTTPError as exc:
         status = getattr(exc, "status_code", None)
         if status == 402:
@@ -208,6 +230,8 @@ def search_handles(
     count_per: int = 8,
     token: str = "",
     failure_out: Optional[List[str]] = None,
+    deadline: float | None = None,
+    cancel: Any = None,
 ) -> List[Dict[str, Any]]:
     """FROM lane: tweets authored BY each handle (their own timeline).
 
@@ -225,6 +249,10 @@ def search_handles(
     items: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
     for raw in handles:
+        if (cancel is not None and cancel.is_set()) or (deadline is not None and time.monotonic() >= deadline):
+            if failure_out is not None:
+                failure_out.append("Xquik research cancelled or timed out")
+            break
         handle = str(raw).lstrip("@").strip()
         if not handle:
             continue
@@ -235,6 +263,8 @@ def search_handles(
             seen_ids=seen_ids, relevance_query=topic,
             index_offset=len(items),
             failure_out=failure_out,
+            deadline_monotonic=deadline,
+            cancel=cancel,
         )
         if auth_error:
             # Fatal auth/payment failure — stop, keep what we have. Surface the
@@ -256,6 +286,8 @@ def search_mentions(
     count_per: int = 5,
     token: str = "",
     failure_out: Optional[List[str]] = None,
+    deadline: float | None = None,
+    cancel: Any = None,
 ) -> List[Dict[str, Any]]:
     """ABOUT lane: tweets mentioning each handle, authored by OTHERS.
 
@@ -272,6 +304,10 @@ def search_mentions(
     items: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
     for raw in handles:
+        if (cancel is not None and cancel.is_set()) or (deadline is not None and time.monotonic() >= deadline):
+            if failure_out is not None:
+                failure_out.append("Xquik research cancelled or timed out")
+            break
         handle = str(raw).lstrip("@").strip()
         if not handle:
             continue
@@ -282,6 +318,8 @@ def search_mentions(
             seen_ids=seen_ids, relevance_query=topic,
             index_offset=len(items),
             failure_out=failure_out,
+            deadline_monotonic=deadline,
+            cancel=cancel,
         )
         if auth_error:
             if failure_out is not None:
