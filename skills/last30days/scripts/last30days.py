@@ -2137,6 +2137,7 @@ def _run_discover_nominate(args: argparse.Namespace, config: dict[str, object]) 
         # 2-3 report degraded coverage instead of silently reading clean; the
         # mock stamp keeps mock-born and real state from cross-finalizing.
         source_status=result.source_status,
+        warnings=result.warnings,
         mock=args.mock,
         # Same resolution as _discover_handoff_state_dir: save dir when
         # given, else the config dir.

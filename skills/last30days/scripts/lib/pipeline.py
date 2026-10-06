@@ -1417,6 +1417,7 @@ class DiscoverNominateResult:
     to_date: str
     source_status: dict[str, schema.SourceOutcome]
     pool: list[tuple[Nomination, str]]
+    warnings: list[str] = field(default_factory=list)
 
 
 def run_discover_nominate(
@@ -1461,6 +1462,7 @@ def run_discover_nominate(
         to_date=sweep.to_date,
         source_status=sweep.source_status,
         pool=pool,
+        warnings=list(sweep.bundle.artifacts.get("x_partial_coverage", [])),
     )
 
 
@@ -1474,6 +1476,7 @@ def nominate_nothing_solid_report(result: DiscoverNominateResult) -> schema.Disc
     failed = _degraded_discovery_sources(result.source_status)
     if failed:
         warnings.append(f"Some discovery sources degraded: {', '.join(sorted(failed))}.")
+    warnings.extend(result.warnings)
     return schema.DiscoveryReport(
         domain=result.plan.domain,
         range_from=result.from_date,
@@ -1986,7 +1989,10 @@ def run_discover_resume(
         plan=plan,
         topics=topics,
         source_status=source_status,
-        warnings=_discovery_report_warnings(topics, outcome, source_status),
+        warnings=(
+            _discovery_report_warnings(topics, outcome, source_status)
+            + list(getattr(bundle, "warnings", None) or [])
+        ),
         outcome=outcome,
         weak_signal=weak_signal[1] if weak_signal and not topics else None,
     )
