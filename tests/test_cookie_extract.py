@@ -216,8 +216,33 @@ class TestExtractFirefoxCookies:
                 "AUTH_TOKEN": "dummy-auth",
             })
         assert found == {"CT0": "dummy-ct0"}
-        assert requested == [["ct0"]]
-        assert "permission denied" not in capsys.readouterr().err.lower()
+        assert requested == [["auth_token", "ct0"], ["ct0"]]
+        assert "permission denied" in capsys.readouterr().err.lower()
+
+    def test_manual_token_keeps_complete_profile_preference_without_denial(self, mock_firefox_env):
+        profiles_dir = mock_firefox_env(
+            profiles={
+                "abc123.default-release": [(".x.com", "ct0", "stale-ct0")],
+                "xyz789.other": [
+                    (".x.com", "auth_token", "dummy-auth"),
+                    (".x.com", "ct0", "matching-ct0"),
+                ],
+            }
+        )
+        requested = []
+
+        def extract_requested(_browser, domain, cookie_names):
+            if domain == ".x.com":
+                requested.append(cookie_names)
+            return cookie_extract._try_firefox_dir(profiles_dir, domain, cookie_names)
+
+        with patch("lib.cookie_extract.extract_cookies", side_effect=extract_requested):
+            found = env.extract_browser_credentials({
+                "FROM_BROWSER": "firefox", "BROWSER_CONSENT": "true",
+                "AUTH_TOKEN": "dummy-auth",
+            })
+        assert found == {"CT0": "matching-ct0"}
+        assert requested == [["auth_token", "ct0"]]
 
     def test_later_install_entry_outside_profiles_survives_first_denial(self, tmp_path):
         profiles_dir = tmp_path / "Firefox"
