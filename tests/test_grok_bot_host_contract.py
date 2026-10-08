@@ -95,7 +95,7 @@ def _extras_passages(text: str) -> dict[str, str]:
     modal = _slice_between(step0, "### Claude Code Modal Flow", "### Non-Modal Prose Flow")
     prose = _slice_between(step0, "### Non-Modal Prose Flow", FLOW_HEADING)
     manual = step0[step0.index("### Manual Setup Guide") :]
-    modal_extras = _slice_between(modal, "**Extras-host X login", "**macOS Full Disk Access")
+    modal_extras = _slice_between(modal, "**Extras-host X login", "**macOS browser-data permission remediation")
     prose_extras = _slice_between(prose, "**Extras hosts", "   - On **no**")
     manual_extras = _slice_between(manual, "**X on Linux / Mac mini (repair).**", "**Reddit (free")
     return {"modal": modal_extras, "prose": prose_extras, "manual": manual_extras}

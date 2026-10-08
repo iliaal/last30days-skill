@@ -1159,7 +1159,10 @@ def extract_browser_credentials(config: dict[str, Any]) -> dict[str, str]:
         return {}
     extracted: dict[str, str] = {}
     for _service, spec in COOKIE_DOMAINS.items():
-        if all(config.get(env_key) for env_key in spec["mapping"].values()):
+        needed_cookies = [
+            name for name in spec["cookies"] if not config.get(spec["mapping"][name])
+        ]
+        if not needed_cookies:
             continue
         # Cookies from different browsers can belong to different sessions,
         # so values are never combined across browsers: a complete set from
@@ -1169,7 +1172,7 @@ def extract_browser_credentials(config: dict[str, Any]) -> dict[str, str]:
         denied_browsers: list[str] = []
         for browser in browsers:
             try:
-                cookies = cookie_extract.extract_cookies(browser, spec["domain"], spec["cookies"])
+                cookies = cookie_extract.extract_cookies(browser, spec["domain"], needed_cookies)
             except PermissionError:
                 denied_browsers.append(browser)
                 continue
@@ -1177,7 +1180,7 @@ def extract_browser_credentials(config: dict[str, Any]) -> dict[str, str]:
                 continue
             if not cookies:
                 continue
-            if cookie_extract.has_complete_pair(cookies, spec["cookies"]):
+            if cookie_extract.has_complete_pair(cookies, needed_cookies):
                 chosen = cookies
                 break
             if fallback is None:
@@ -1185,7 +1188,7 @@ def extract_browser_credentials(config: dict[str, Any]) -> dict[str, str]:
         if chosen is None:
             chosen = fallback or {}
         if _service == "x" and denied_browsers and not cookie_extract.has_complete_pair(
-            chosen, spec["cookies"]
+            chosen, needed_cookies
         ):
             sys.stderr.write(
                 "[last30days] X browser cookie access permission denied in "

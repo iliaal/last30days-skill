@@ -160,19 +160,40 @@ def _find_default_profile(
                 if section.startswith("Install") and config.has_option(section, "Default"):
                     raw = config.get(section, "Default")
                     candidate = profiles_dir / raw
-                    if path_is_dir(candidate):
+                    try:
+                        found = path_is_dir(candidate)
+                    except PermissionError as exc:
+                        denied.append(exc)
+                        continue
+                    if found:
+                        if denials is not None:
+                            denials.extend(denied)
                         return candidate
 
             # Second pass: Profile section with Default=1
             for section in config.sections():
                 if section.startswith("Profile") and config.has_option(section, "Default") and config.get(section, "Default") == "1":
-                    return _resolve_profile_path(profiles_dir, config, section)
+                    try:
+                        resolved = _resolve_profile_path(profiles_dir, config, section)
+                    except PermissionError as exc:
+                        denied.append(exc)
+                        continue
+                    if resolved is not None:
+                        if denials is not None:
+                            denials.extend(denied)
+                        return resolved
 
             # Third pass: first Profile section that exists on disk
             for section in config.sections():
                 if section.startswith("Profile"):
-                    resolved = _resolve_profile_path(profiles_dir, config, section)
-                    if resolved and path_is_dir(resolved):
+                    try:
+                        resolved = _resolve_profile_path(profiles_dir, config, section)
+                    except PermissionError as exc:
+                        denied.append(exc)
+                        continue
+                    if resolved:
+                        if denials is not None:
+                            denials.extend(denied)
                         return resolved
         except PermissionError as exc:
             denied.append(exc)

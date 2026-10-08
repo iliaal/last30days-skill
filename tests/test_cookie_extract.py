@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from lib import cookie_extract
+from lib import cookie_extract, env
 from lib.cookie_extract import (
     extract_cookies,
     extract_firefox_cookies,
@@ -185,6 +185,58 @@ def mock_firefox_env(tmp_path):
 
 class TestExtractFirefoxCookies:
     """Tests for extract_firefox_cookies."""
+
+    def test_partial_cookie_survives_later_profile_denial(self, mock_firefox_env, capsys):
+        profiles_dir = mock_firefox_env(
+            profiles={
+                "abc123.default-release": [(".x.com", "ct0", "dummy-ct0")],
+                "xyz789.other": [],
+            }
+        )
+        blocked = profiles_dir / "xyz789.other" / "cookies.sqlite"
+        real_copyfile = cookie_extract.shutil.copyfile
+        requested = []
+
+        def guarded_copyfile(source, target):
+            if source == str(blocked):
+                raise PermissionError(1, "Operation not permitted", str(blocked))
+            return real_copyfile(source, target)
+
+        def extract_requested(_browser, domain, cookie_names):
+            if domain == ".x.com":
+                requested.append(cookie_names)
+            return cookie_extract._try_firefox_dir(profiles_dir, domain, cookie_names)
+
+        with patch("lib.cookie_extract.shutil.copyfile", side_effect=guarded_copyfile), patch(
+            "lib.cookie_extract.extract_cookies",
+            side_effect=extract_requested,
+        ):
+            found = env.extract_browser_credentials({
+                "FROM_BROWSER": "firefox", "BROWSER_CONSENT": "true",
+                "AUTH_TOKEN": "dummy-auth",
+            })
+        assert found == {"CT0": "dummy-ct0"}
+        assert requested == [["ct0"]]
+        assert "permission denied" not in capsys.readouterr().err.lower()
+
+    def test_later_install_entry_outside_profiles_survives_first_denial(self, tmp_path):
+        profiles_dir = tmp_path / "Firefox"
+        profiles_dir.mkdir()
+        blocked = tmp_path / "blocked"
+        available = tmp_path / "external-profile"
+        available.mkdir()
+        (profiles_dir / "profiles.ini").write_text(
+            f"[InstallA]\nDefault={blocked}\n[InstallB]\nDefault={available}\n"
+        )
+        real_stat = Path.stat
+
+        def guarded_stat(path, *args, **kwargs):
+            if path == blocked:
+                raise PermissionError(1, "Operation not permitted", str(path))
+            return real_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", guarded_stat):
+            assert _find_default_profile(profiles_dir) == available
 
     def test_denied_default_copy_uses_complete_pair_in_alternate_profile(self, mock_firefox_env):
         profiles_dir = mock_firefox_env(

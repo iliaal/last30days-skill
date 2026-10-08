@@ -301,6 +301,18 @@ class CookieBackedXReadiness(unittest.TestCase):
         self.assertIn("permission denied", record["note"])
         self.assertIn("AUTH_TOKEN", record["fix"])
 
+    def test_last_setup_denial_preserves_exclusive_xurl_pin_repair(self):
+        config = {
+            "LAST30DAYS_X_BACKEND": "xurl",
+            "FROM_BROWSER": "edge", "BROWSER_CONSENT": "true",
+            "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge",
+        }
+        with _Hermetic():
+            record = doctor._x_record(config)
+        self.assertTrue(record["pinned"])
+        self.assertIn("xurl", record["fix"].lower())
+        self.assertIn("Last setup", record["note"])
+
     def test_discovery_stat_denial_reaches_setup_and_no_read_doctor(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             profiles = Path(temp_dir)

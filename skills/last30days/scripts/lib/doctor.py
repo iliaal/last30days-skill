@@ -512,6 +512,13 @@ def _x_record(config):
         denied_browsers = sorted(reported_denials & known_browsers)
     else:
         denied_browsers = []
+    if denied_browsers and record.get("pinned") and env.x_backend_pin(config) != "bird":
+        observation = (
+            "Last setup: permission denied reading X cookies from "
+            f"{', '.join(denied_browsers)}; current access not checked"
+        )
+        record["note"] = f"{record['note']}; {observation}" if record["note"] else observation
+        return record
     if (pending_bird or denied_browsers) and record["status"] in ("unconfigured", health.ERROR):
         backends_list = record.get("backends", [])
         auto_backends = [b for b in backends_list if b.get("name") in auto_chain_names]
