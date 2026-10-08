@@ -314,8 +314,11 @@ class TestOnboardingContract(unittest.TestCase):
         # transport/rate-limit escalation, and no longer empty-only).
         self.assertIn("fewer than 5 items", before)
         self.assertIn("LAST30DAYS_REDDIT_SC_MIN_ITEMS=0", before)
+        self.assertIn("YouTube search below 3", before)
+        self.assertIn("LAST30DAYS_YT_SC_MIN_ITEMS=0", before)
+        self.assertIn("spends credits", before)
         self.assertNotIn("returns no items", before)
-        self.assertNotIn("empty-only", before)
+        self.assertNotIn("empty-path Reddit", before)
         self.assertNotIn("when they hit rate limits", before)
         # Free-path comments are shreddit; do not claim SC comment preference.
         self.assertNotIn("prefers ScrapeCreators for Reddit", before)

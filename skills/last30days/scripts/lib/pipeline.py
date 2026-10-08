@@ -2803,6 +2803,11 @@ def run(
                     # Do not re-fan-out against a host still inside its window.
                     with rate_limit_lock:
                         rate_limited_sources.add(source)
+            if isinstance(artifact, dict) and artifact.get("_source_outcome_deferred"):
+                artifact = dict(artifact)
+                deferred_retryable_failures.setdefault(
+                    source, artifact.pop("_source_outcome_deferred")
+                )
             if isinstance(artifact, dict):
                 artifact.pop("_x_backup_not_rate_limited", None)
             normalized = _normalize_score_dedupe(
@@ -4106,6 +4111,13 @@ def _retryable_youtube_outcome(outcome: dict[str, Any]) -> bool:
     )
 
 
+def _retryable_youtube_error(message: str, state: str | None = None) -> bool:
+    return _retryable_youtube_outcome({
+        "state": state or youtube_yt.classify_run_failure(message),
+        "detail": message,
+    })
+
+
 def _topic_handle_mentions(topic: str) -> set[str]:
     """@mentions in the topic, which are real X handles.
 
@@ -4804,6 +4816,8 @@ def _retry_thin_sources(
         normalized = _apply_reddit_stream_keepers(
             source, normalized, settings["per_stream_limit"], topic
         )
+        if isinstance(artifact, dict) and artifact.get("_source_outcome_deferred"):
+            outcome_note = outcome_note or artifact["_source_outcome_deferred"]
         if not normalized and isinstance(artifact, dict):
             outcome_note = outcome_note or artifact.get("_source_outcome_if_empty")
         return source, normalized, outcome_note, (detail_note, detail_state)
@@ -4968,6 +4982,23 @@ def _merge_reddit_items(free: list[dict], sc: list[dict]) -> list[dict]:
         if key and key not in seen:
             seen.add(key)
             merged.append(it)
+    return merged
+
+
+def _merge_youtube_items(free: list[dict], sc: list[dict]) -> list[dict]:
+    merged = copy.deepcopy(free)
+    by_id = {item.get("video_id"): item for item in merged if item.get("video_id")}
+    for item in sc:
+        video_id = item.get("video_id")
+        if not video_id:
+            continue
+        existing = by_id.get(video_id)
+        if existing is None:
+            merged.append(item)
+            by_id[video_id] = item
+        elif not str(existing.get("transcript_snippet") or "").strip() and item.get("transcript_snippet"):
+            existing["transcript_snippet"] = item["transcript_snippet"]
+            existing["transcript_highlights"] = item.get("transcript_highlights", [])
     return merged
 
 
@@ -5656,20 +5687,79 @@ def _retrieve_stream_impl(
             except Exception as exc:
                 youtube_failure = str(exc)
                 result = None
-        # Fall back to SC YouTube search if yt-dlp failed or isn't installed.
-        if (result is None or not result.get("items")) and sc_token:
+        free_items = list((result or {}).get("items") or [])
+        min_items = env.youtube_sc_min_items(config)
+        backfill_thin = bool(free_items) and len(free_items) < min_items
+        thin_detail: str | None = None
+        thin_error = False
+        thin_retryable = False
+        if (not free_items or backfill_thin) and sc_token:
+            backfill_scope = (
+                http.capture_failures() if free_items else contextlib.nullcontext([])
+            )
             try:
-                result = youtube_yt.search_youtube_sc(
-                    yt_query, from_date, to_date, depth=depth, token=sc_token,
-                )
-                if result.get("error"):
-                    youtube_failure = str(result["error"])
-                elif result.get("items") and youtube_failure:
-                    recovered_failure = youtube_failure
+                with backfill_scope as sc_failures:
+                    transcribed_free_ids = {
+                        item["video_id"] for item in free_items
+                        if item.get("video_id")
+                        and str(item.get("transcript_snippet") or "").strip()
+                    }
+                    sc_result = youtube_yt.search_youtube_sc(
+                        yt_query, from_date, to_date, depth=depth, token=sc_token,
+                        skip_transcript_ids=transcribed_free_ids,
+                    )
+                sc_error = str(sc_result["error"]) if sc_result.get("error") else None
+                if backfill_thin:
+                    merged = _merge_youtube_items(free_items, sc_result.get("items") or [])
+                    result = {"items": merged}
+                    thin_detail = (
+                        f"yt-dlp returned {len(free_items)} videos below the "
+                        f"{min_items}-video backfill floor; ScrapeCreators added "
+                        f"{len(merged) - len(free_items)} videos"
+                    )
+                    if youtube_failure:
+                        thin_detail += f"; yt-dlp search: {youtube_failure}"
+                    if sc_error:
+                        thin_detail += f"; ScrapeCreators search: {sc_error}"
+                    if sc_failures:
+                        thin_detail += f"; ScrapeCreators: {_summarize_lane_failures(sc_failures, 'youtube')}"
+                    thin_error = bool(youtube_failure or sc_error or sc_failures)
+                    thin_retryable = thin_error and (
+                        len(merged) < min_items
+                        and (not youtube_failure or _retryable_youtube_error(youtube_failure))
+                        and (not sc_error or _retryable_youtube_error(sc_error))
+                        and all(
+                            _retryable_youtube_error(str(f), f.outcome_state)
+                            for f in sc_failures
+                        )
+                    )
                     youtube_failure = None
+                    recovered_failure = None
+                else:
+                    result = sc_result
+                    if sc_error:
+                        youtube_failure = sc_error
+                    elif result.get("items") and youtube_failure:
+                        recovered_failure = youtube_failure
+                        youtube_failure = None
             except Exception as exc:
+                prior_youtube_failure = youtube_failure
                 youtube_failure = str(exc)
-                result = None
+                result = {"items": free_items} if free_items else None
+                if backfill_thin:
+                    thin_error = True
+                    thin_detail = (
+                        f"yt-dlp returned {len(free_items)} videos below the "
+                        f"{min_items}-video backfill floor; ScrapeCreators failed: {exc}"
+                    )
+                    if prior_youtube_failure:
+                        thin_detail += f"; yt-dlp search: {prior_youtube_failure}"
+                    thin_retryable = (
+                        _retryable_youtube_error(
+                            str(exc), getattr(exc, "outcome_state", None)
+                        )
+                        and (not prior_youtube_failure or _retryable_youtube_error(prior_youtube_failure))
+                    )
         if result is None:
             result = {"items": []}
         # Enrich top videos with comments (default-on when a key is present).
@@ -5678,6 +5768,16 @@ def _retrieve_stream_impl(
             youtube_yt.enrich_with_comments(
                 items, token=config.get("SCRAPECREATORS_API_KEY", ""),
             )
+        if thin_detail:
+            if not thin_error:
+                return items, {"_source_outcome_detail": thin_detail}
+            outcome = _outcome_artifact(health.PARTIAL, thin_detail)
+            if thin_retryable:
+                return items, {
+                    "_source_outcome_detail": thin_detail,
+                    "_source_outcome_deferred": outcome["_source_outcome"],
+                }
+            return items, outcome
         if youtube_failure:
             state = youtube_yt.classify_run_failure(youtube_failure)
             attempted = state != schema.SKIPPED_UNCONFIGURED
