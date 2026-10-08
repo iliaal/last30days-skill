@@ -48,6 +48,8 @@ _BLOCK_MARKERS = (
     "attention required",
     "cf-browser-verification",
     "challenge-platform",
+    "/svc/shreddit/js-challenge",
+    "please wait for verification",
     "enable javascript and reload",
     "you've been blocked",
     "whoa there",

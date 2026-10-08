@@ -492,6 +492,38 @@ def test_dedicated_reddit_challenge_fragment_reports_schema_drift():
     assert "interstitial" in (outcome.detail or "")
 
 
+def test_dedicated_reddit_search_challenge_fixture_reports_schema_drift():
+    body = (REPO_ROOT / "fixtures/reddit_search_challenge.html").read_text(
+        encoding="utf-8"
+    )
+    with mock.patch.object(pipeline, "available_sources", return_value=["reddit"]), \
+         mock.patch.object(reddit_listing.http, "get_text", return_value=body), \
+         mock.patch("lib.reddit_arctic.fetch_listings", return_value=[]):
+        report = pipeline.run_discover(
+            domain="tea", config={}, as_of_date="2026-07-10",
+            subreddits=["tea"],
+        )
+
+    outcome = report.source_status["reddit"]
+    assert outcome.state == schema.SCHEMA_DRIFT
+    assert "interstitial" in (outcome.detail or "")
+
+
+def test_dedicated_reddit_verification_title_reports_schema_drift():
+    body = "<html><title>Please wait for verification</title></html>"
+    with mock.patch.object(pipeline, "available_sources", return_value=["reddit"]), \
+         mock.patch.object(reddit_listing.http, "get_text", return_value=body), \
+         mock.patch("lib.reddit_arctic.fetch_listings", return_value=[]):
+        report = pipeline.run_discover(
+            domain="tea", config={}, as_of_date="2026-07-10",
+            subreddits=["tea"],
+        )
+
+    outcome = report.source_status["reddit"]
+    assert outcome.state == schema.SCHEMA_DRIFT
+    assert "interstitial" in (outcome.detail or "")
+
+
 def test_global_digg_empty_topic_skips_cli_without_fabricated_failure():
     plan = schema.DiscoveryPlan(
         domain="", category=None, subreddits=[], sources=["digg"],
