@@ -68,6 +68,43 @@ def test_two_free_videos_merge_duplicate_transcript_without_replacing_free_metad
     assert "added 1" in artifact["_source_outcome_detail"]
 
 
+def test_backfill_spends_transcript_calls_only_on_missing_or_new_videos():
+    free = [
+        {"video_id": "ready", "title": "free ready", "transcript_snippet": "free transcript"},
+        {"video_id": "missing", "title": "free missing", "transcript_snippet": "   "},
+    ]
+    video_ids = ["ready", "missing", *(f"new{i}" for i in range(5))]
+    raw_search = [
+        {
+            "id": video_id, "title": f"SC {video_id}", "date": "2026-06-15",
+            "views": 100 - index,
+        }
+        for index, video_id in enumerate(video_ids)
+    ]
+    with (
+        mock.patch.object(pipeline, "which", return_value="/usr/bin/yt-dlp"),
+        mock.patch.object(youtube_yt, "search_and_transcribe", return_value={"items": free}),
+        mock.patch.object(youtube_yt, "_sc_youtube_search", return_value=raw_search) as search,
+        mock.patch.object(
+            youtube_yt, "_sc_fetch_transcript",
+            side_effect=lambda video_id, token: f"paid transcript for {video_id}",
+        ) as transcripts,
+        mock.patch.object(pipeline.env, "is_youtube_comments_available", return_value=False),
+    ):
+        items, _ = _youtube_stream({"SCRAPECREATORS_API_KEY": "dummy-key"})
+
+    search.assert_called_once()
+    assert [call.args[0] for call in transcripts.call_args_list] == video_ids[1:]
+    assert len(transcripts.call_args_list) == 6
+    assert [item["video_id"] for item in items] == video_ids
+    assert items[0]["title"] == "free ready"
+    assert items[0]["transcript_snippet"] == "free transcript"
+    assert items[1]["title"] == "free missing"
+    assert items[1]["transcript_snippet"] == "paid transcript for missing"
+    assert items[-1]["title"] == "SC new4"
+    assert items[-1]["transcript_snippet"] == "paid transcript for new4"
+
+
 def test_keyless_and_disabled_floor_keep_free_results_without_paid_search():
     free = {"video_id": "a", "transcript_snippet": ""}
     with (

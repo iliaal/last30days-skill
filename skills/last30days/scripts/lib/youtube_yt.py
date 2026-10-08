@@ -1557,6 +1557,7 @@ def search_youtube_sc(
     to_date: str,
     depth: str = "default",
     token: str = None,
+    skip_transcript_ids: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """Search YouTube via ScrapeCreators when yt-dlp is absent, empty, or thin.
 
@@ -1569,6 +1570,7 @@ def search_youtube_sc(
         to_date: End date (YYYY-MM-DD)
         depth: 'quick', 'default', or 'deep'
         token: ScrapeCreators API key
+        skip_transcript_ids: Video IDs already transcribed by the free search
 
     Returns:
         Dict with 'items' list of video metadata dicts.
@@ -1641,14 +1643,19 @@ def search_youtube_sc(
     # Step 2: Fetch transcripts for top videos
     transcript_limit = TRANSCRIPT_LIMITS.get(depth, TRANSCRIPT_LIMITS["default"])
     if transcript_limit > 0 and items:
-        attempt_count = min(len(items), transcript_limit * 3)
         # Same in-window-first ordering as search_and_transcribe(): don't let
         # an out-of-window back-catalog (kept by the soft date filter above)
         # consume the transcript budget of videos the freshness scorer keeps.
         in_window = [i for i in items if i.get("date") and i["date"] >= from_date]
         out_of_window = [i for i in items if not (i.get("date") and i["date"] >= from_date)]
+        excluded_ids = skip_transcript_ids or set()
+        transcript_candidates = [
+            item for item in in_window + out_of_window
+            if item["video_id"] not in excluded_ids
+        ]
+        attempt_count = min(len(transcript_candidates), transcript_limit * 3)
         _log(f"Fetching SC transcripts for up to {attempt_count} videos (target: {transcript_limit})")
-        for item in (in_window + out_of_window)[:attempt_count]:
+        for item in transcript_candidates[:attempt_count]:
             vid = item["video_id"]
             if not vid:
                 continue

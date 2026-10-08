@@ -4996,7 +4996,7 @@ def _merge_youtube_items(free: list[dict], sc: list[dict]) -> list[dict]:
         if existing is None:
             merged.append(item)
             by_id[video_id] = item
-        elif not existing.get("transcript_snippet") and item.get("transcript_snippet"):
+        elif not str(existing.get("transcript_snippet") or "").strip() and item.get("transcript_snippet"):
             existing["transcript_snippet"] = item["transcript_snippet"]
             existing["transcript_highlights"] = item.get("transcript_highlights", [])
     return merged
@@ -5699,8 +5699,14 @@ def _retrieve_stream_impl(
             )
             try:
                 with backfill_scope as sc_failures:
+                    transcribed_free_ids = {
+                        item["video_id"] for item in free_items
+                        if item.get("video_id")
+                        and str(item.get("transcript_snippet") or "").strip()
+                    }
                     sc_result = youtube_yt.search_youtube_sc(
                         yt_query, from_date, to_date, depth=depth, token=sc_token,
+                        skip_transcript_ids=transcribed_free_ids,
                     )
                 sc_error = str(sc_result["error"]) if sc_result.get("error") else None
                 if backfill_thin:
