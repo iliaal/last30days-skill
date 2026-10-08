@@ -77,7 +77,8 @@ def test_reddit_backend_env_var_is_documented_for_users_and_runtime_skill():
     assert "LAST30DAYS_REDDIT_SC_MIN_ITEMS=0" in skill_text
     assert "LAST30DAYS_REDDIT_SC_MIN_ITEMS=0" in config_text
     for text in (skill_text, config_text):
-        assert "empty-only" not in text
+        assert "LAST30DAYS_YT_SC_MIN_ITEMS=0" in text
+        assert "YouTube search" in text
         assert "returns no items" not in text
         assert "returns **no items**" not in text
 

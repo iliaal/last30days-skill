@@ -1558,10 +1558,10 @@ def search_youtube_sc(
     depth: str = "default",
     token: str = None,
 ) -> Dict[str, Any]:
-    """Search YouTube via ScrapeCreators API (fallback when yt-dlp is unavailable).
+    """Search YouTube via ScrapeCreators when yt-dlp is absent, empty, or thin.
 
     Uses SC keyword search to find videos and SC transcript endpoint to
-    fetch transcripts. Called by pipeline.py when yt-dlp fails.
+    fetch transcripts. The pipeline uses the configured thin-result floor.
 
     Args:
         topic: Search topic

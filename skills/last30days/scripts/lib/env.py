@@ -623,6 +623,7 @@ def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
         # Per-source deadline (seconds) for doctor --probe live checks.
         ('LAST30DAYS_DOCTOR_PROBE_TIMEOUT', None),
         ('LAST30DAYS_REDDIT_SC_MIN_ITEMS', None),
+        ('LAST30DAYS_YT_SC_MIN_ITEMS', None),
         ('LAST30DAYS_STORE', None),
         # Discovery topic queue (podcast/X-article pipeline memory). Default
         # ON; the literal value "off" disables queue writes and annotations.
@@ -1326,6 +1327,8 @@ REDDIT_SC_MIN_ITEMS_VAR = 'LAST30DAYS_REDDIT_SC_MIN_ITEMS'
 # fewer than this many items. Thin topics yield 2-3 free results; healthy
 # topics many more, so 5 spends credits only where it adds coverage.
 REDDIT_SC_MIN_ITEMS_DEFAULT = 5
+YOUTUBE_SC_MIN_ITEMS_VAR = 'LAST30DAYS_YT_SC_MIN_ITEMS'
+YOUTUBE_SC_MIN_ITEMS_DEFAULT = 3
 
 
 def reddit_sc_min_items(config: dict[str, Any]) -> int:
@@ -1338,6 +1341,17 @@ def reddit_sc_min_items(config: dict[str, Any]) -> int:
     raw = config.get(REDDIT_SC_MIN_ITEMS_VAR)
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return REDDIT_SC_MIN_ITEMS_DEFAULT
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def youtube_sc_min_items(config: dict[str, Any]) -> int:
+    """Minimum yt-dlp result count before keyed YouTube search backfill is skipped."""
+    raw = config.get(YOUTUBE_SC_MIN_ITEMS_VAR)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return YOUTUBE_SC_MIN_ITEMS_DEFAULT
     try:
         return max(int(raw), 0)
     except (TypeError, ValueError):
