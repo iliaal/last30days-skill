@@ -385,9 +385,12 @@ class TestOnboardingContract(unittest.TestCase):
                 self.assertNotIn("only a Firefox/Safari winner", flow)
                 self.assertNotIn("Chrome never re-", flow)
 
-    def test_fda_reframed_as_safari_fallback(self):
-        """Full Disk Access is framed as Safari-only, not the default path."""
+    def test_browser_permission_remediation_keeps_chromium_first(self):
+        """Browser permission guidance does not change consented scan order."""
         self.assertNotIn("scan your browser (Firefox/Safari)", self.modal)
+        self.assertIn("X cookie access was permission denied", self.modal)
+        self.assertIn("X cookie access was permission denied", self.prose)
+        self.assertIn("AUTH_TOKEN and CT0", self.modal)
 
     def test_welcome_embedded_in_modal(self):
         """The welcome pitch lives INSIDE the setup modal (the only always-visible

@@ -819,6 +819,76 @@ class TestGetSetupStatusText:
         assert "browser cookies" not in text.lower()
         assert "X/Twitter" not in text
 
+    def test_consented_permission_denial_reports_x_and_safe_alternatives(self):
+        with patch(
+            "lib.cookie_extract.extract_cookies_with_source",
+            side_effect=PermissionError(1, "Operation not permitted", "/private/secret/Cookies"),
+        ), patch("shutil.which", return_value=None):
+            results = setup_wizard.run_auto_setup(
+                {"FROM_BROWSER": "edge"}, allow_browser_cookies=True
+            )
+        assert results["cookies_found"] == {}
+        assert results["x_cookie_access_denied"] == ["edge"]
+        text = setup_wizard.get_setup_status_text(results)
+        assert "permission denied" in text.lower()
+        assert "edge" in text
+        assert "AUTH_TOKEN" in text and "CT0" in text
+        assert "XAI_API_KEY" in text
+        assert "/private/secret" not in text
+
+    def test_missing_cookies_do_not_record_permission_denial(self):
+        with patch(
+            "lib.cookie_extract.extract_cookies_with_source", return_value=None
+        ), patch("shutil.which", return_value=None):
+            results = setup_wizard.run_auto_setup(
+                {"FROM_BROWSER": "edge"}, allow_browser_cookies=True
+            )
+        assert results["x_cookie_access_denied"] == []
+
+    def test_complete_pair_from_another_browser_supersedes_denial(self):
+        def extract(browser, domain, _cookie_names):
+            if browser == "edge":
+                raise PermissionError(1, "Operation not permitted", "/private/Cookies")
+            if browser == "firefox" and domain == ".x.com":
+                return ({"auth_token": "dummy-auth", "ct0": "dummy-ct0"}, "firefox")
+            return None
+
+        with patch(
+            "lib.cookie_extract.extract_cookies_with_source", side_effect=extract
+        ), patch("shutil.which", return_value=None):
+            results = setup_wizard.run_auto_setup(
+                {"FROM_BROWSER": "edge,firefox"}, allow_browser_cookies=True
+            )
+        assert results["cookies_found"]["x"] == "firefox"
+        assert results["x_cookie_access_denied"] == []
+
+    def test_other_source_success_does_not_clear_x_denial(self):
+        def extract(browser, domain, _cookie_names):
+            if domain == ".x.com" and browser == "edge":
+                raise PermissionError(1, "Operation not permitted", "/private/Cookies")
+            if domain == ".truthsocial.com" and browser == "chrome":
+                return ({"_session_id": "dummy-session"}, "chrome")
+            return None
+
+        with patch(
+            "lib.cookie_extract.extract_cookies_with_source", side_effect=extract
+        ), patch("shutil.which", return_value=None):
+            results = setup_wizard.run_auto_setup({}, allow_browser_cookies=True)
+        assert results["cookies_found"] == {"truthsocial": "chrome"}
+        assert results["x_cookie_access_denied"] == ["edge"]
+
+    def test_last_setup_denial_marker_is_replaced_after_success(self, tmp_path):
+        env_path = tmp_path / ".env"
+        assert setup_wizard.write_setup_config(
+            env_path, browser_consent=True, x_cookie_access_denied="edge"
+        )
+        assert setup_wizard.write_setup_config(
+            env_path, browser_consent=True, x_cookie_access_denied="none"
+        )
+        content = env_path.read_text()
+        assert "LAST30DAYS_X_COOKIE_ACCESS_DENIED=none" in content
+        assert "LAST30DAYS_X_COOKIE_ACCESS_DENIED=edge" not in content
+
     def test_status_text_installed(self):
         """Status text for freshly installed yt-dlp."""
         results = {
@@ -924,6 +994,60 @@ class TestGetSetupStatusText:
 
 class TestSetupSubcommand:
     """Tests for setup dispatch through the production entrypoint."""
+
+    def test_permission_denial_reaches_cli_and_saved_doctor_marker(self, tmp_path, capsys):
+        env_path = tmp_path / ".env"
+        results = {
+            "cookies_found": {},
+            "x_cookie_access_denied": ["edge"],
+            "browser_cookie_scan_attempted": True,
+            "ytdlp_action": "already_installed",
+        }
+        with patch.object(sys, "argv", ["last30days", "setup", "--allow-browser-cookies"]), patch.object(
+            cli.env, "get_config", return_value={"FROM_BROWSER": "edge"}
+        ), patch.object(cli.env, "CONFIG_FILE", env_path), patch.object(
+            setup_wizard, "run_auto_setup", return_value=results
+        ):
+            assert cli.main() == 0
+        notice = capsys.readouterr().err
+        assert "permission denied" in notice.lower()
+        assert "edge" in notice
+        assert "LAST30DAYS_X_COOKIE_ACCESS_DENIED=edge" in env_path.read_text()
+
+    def test_no_scan_preserves_last_consented_denial(self, tmp_path):
+        env_path = tmp_path / ".env"
+        env_path.write_text("LAST30DAYS_X_COOKIE_ACCESS_DENIED=edge\n")
+        results = {
+            "cookies_found": {},
+            "x_cookie_access_denied": [],
+            "browser_cookie_scan_attempted": False,
+            "ytdlp_action": "already_installed",
+        }
+        with patch.object(sys, "argv", ["last30days", "setup"]), patch.object(
+            cli.env, "get_config",
+            return_value={"LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge"},
+        ), patch.object(cli.env, "CONFIG_FILE", env_path), patch.object(
+            setup_wizard, "run_auto_setup", return_value=results
+        ):
+            assert cli.main() == 0
+        assert "LAST30DAYS_X_COOKIE_ACCESS_DENIED=edge" in env_path.read_text()
+
+    def test_explicit_browser_off_with_consent_does_not_clear_last_denial(self, tmp_path):
+        env_path = tmp_path / ".env"
+        env_path.write_text("LAST30DAYS_X_COOKIE_ACCESS_DENIED=edge\nFROM_BROWSER=off\n")
+        with patch.object(sys, "argv", ["last30days", "setup", "--allow-browser-cookies"]), patch.object(
+            cli.env, "get_config",
+            return_value={"FROM_BROWSER": "off", "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge"},
+        ), patch.object(cli.env, "CONFIG_FILE", env_path), patch(
+            "lib.cookie_extract.extract_cookies_with_source",
+            side_effect=AssertionError("browser read despite FROM_BROWSER=off"),
+        ), patch.object(setup_wizard, "_install_digg_cli", return_value=(False, "no_npx", "", None)), patch.object(
+            setup_wizard, "install_default_pp_sources", return_value={}
+        ), patch("shutil.which", return_value=None):
+            assert cli.main() == 0
+        content = env_path.read_text()
+        assert "LAST30DAYS_X_COOKIE_ACCESS_DENIED=edge" in content
+        assert "BROWSER_CONSENT=true" in content
 
     def test_setup_detected_as_topic(self, capsys):
         with patch.object(sys, "argv", ["last30days", "setup"]), patch.object(

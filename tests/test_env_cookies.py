@@ -8,6 +8,22 @@ import pytest
 from lib.env import ConfigLoadPolicy, extract_browser_credentials, COOKIE_DOMAINS
 
 
+def test_research_reports_permission_denied_without_cookie_values(capsys):
+    with patch(
+        "lib.cookie_extract.extract_cookies",
+        side_effect=PermissionError(1, "Operation not permitted", "/private/secret/Cookies"),
+    ):
+        extracted = extract_browser_credentials(
+            _base_config(FROM_BROWSER="edge", BROWSER_CONSENT="true")
+        )
+    assert extracted == {}
+    notice = capsys.readouterr().err
+    assert "permission denied" in notice.lower()
+    assert "edge" in notice
+    assert "AUTH_TOKEN" in notice and "CT0" in notice
+    assert "/private/secret" not in notice
+
+
 def _base_config(**overrides):
     """Return a minimal config dict with common defaults."""
     cfg = {

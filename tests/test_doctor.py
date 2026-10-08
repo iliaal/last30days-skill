@@ -30,7 +30,7 @@ from pathlib import Path
 from unittest import mock
 
 import last30days as cli
-from lib import backends, doctor, env, grok_x, health, http, prescriptions, reddit_search
+from lib import backends, doctor, env, grok_x, health, http, prescriptions, reddit_search, setup_wizard
 
 BIRD_STATUS_OFF = {
     "installed": False,
@@ -283,6 +283,122 @@ class CookieBackedXReadiness(unittest.TestCase):
         self.assertIn("browser cookies", note)
         self.assertIn("not verified", note)
         self.assertIn("xai_api_key", note)
+
+    def test_last_setup_permission_denial_overrides_unverified_cookie_prediction(self):
+        config = {
+            "FROM_BROWSER": "edge", "BROWSER_CONSENT": "true",
+            "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge",
+        }
+        with _Hermetic(), mock.patch(
+            "lib.bird_x.is_bird_installed", return_value=True
+        ), mock.patch(
+            "lib.cookie_extract.extract_cookies",
+            side_effect=AssertionError("doctor read cookies"),
+        ):
+            record = doctor._x_record(config)
+        self.assertEqual("error", record["tier"])
+        self.assertIn("Last setup", record["note"])
+        self.assertIn("permission denied", record["note"])
+        self.assertIn("AUTH_TOKEN", record["fix"])
+
+    def test_discovery_stat_denial_reaches_setup_and_no_read_doctor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profiles = Path(temp_dir)
+            profile = profiles / "default"
+            profile.mkdir()
+            blocked = profile / "cookies.sqlite"
+            blocked.touch()
+            real_stat = Path.stat
+            real_is_file = Path.is_file
+
+            def guarded_stat(path, *args, **kwargs):
+                if path == blocked:
+                    raise PermissionError(1, "Operation not permitted", str(path))
+                return real_stat(path, *args, **kwargs)
+
+            def simulated_py314_is_file(path, *args, **kwargs):
+                if path == blocked:
+                    return False
+                return real_is_file(path, *args, **kwargs)
+
+            with mock.patch("lib.cookie_extract._get_firefox_profiles_dir", return_value=profiles), mock.patch(
+                "lib.cookie_extract._is_wsl", return_value=False
+            ), mock.patch.object(
+                Path, "stat", guarded_stat
+            ), mock.patch.object(Path, "is_file", simulated_py314_is_file), mock.patch(
+                "lib.setup_wizard.shutil.which", return_value="/usr/bin/fake"
+            ), mock.patch("lib.setup_wizard._install_digg_cli", return_value=(True, "already_installed", "", "")), mock.patch(
+                "lib.setup_wizard.install_default_pp_sources", return_value={}
+            ), mock.patch("lib.setup_wizard.brightdata_status", return_value={}):
+                results = setup_wizard.run_auto_setup(
+                    {"FROM_BROWSER": "firefox"}, allow_browser_cookies=True
+                )
+            self.assertEqual(["firefox"], results["x_cookie_access_denied"], results)
+            self.assertIn("permission denied", setup_wizard.get_setup_status_text(results).lower())
+            config = {
+                "FROM_BROWSER": "firefox",
+                "BROWSER_CONSENT": "true",
+                "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "firefox",
+            }
+            with _Hermetic(), mock.patch(
+                "lib.cookie_extract.extract_cookies",
+                side_effect=AssertionError("doctor read cookies"),
+            ):
+                record = doctor._x_record(config)
+            self.assertEqual("error", record["tier"])
+            self.assertIn("Last setup", record["note"])
+
+    def test_manual_cookie_pair_supersedes_last_setup_denial(self):
+        config = {
+            "FROM_BROWSER": "edge", "BROWSER_CONSENT": "true",
+            "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge",
+            "AUTH_TOKEN": "dummy-auth-token", "CT0": "dummy-ct0",
+        }
+        with _Hermetic(probe_map={"node": health.OK}), mock.patch(
+            "lib.bird_x.is_bird_installed", return_value=True
+        ):
+            record = doctor._x_record(config)
+        self.assertEqual("ok", record["tier"])
+        self.assertNotIn("permission denied", record["note"])
+
+    def test_denial_after_auto_setup_is_visible_without_from_browser(self):
+        config = {
+            "BROWSER_CONSENT": "true",
+            "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge",
+        }
+        with _Hermetic(), mock.patch(
+            "lib.cookie_extract.extract_cookies",
+            side_effect=AssertionError("doctor read cookies"),
+        ):
+            record = doctor._x_record(config)
+        self.assertEqual("error", record["tier"])
+        self.assertIn("Last setup", record["note"])
+
+    def test_other_source_browser_selection_does_not_hide_x_denial(self):
+        config = {
+            "FROM_BROWSER": "chrome", "BROWSER_CONSENT": "true",
+            "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge",
+        }
+        with _Hermetic(), mock.patch("lib.bird_x.is_bird_installed", return_value=True):
+            record = doctor._x_record(config)
+        self.assertEqual("error", record["tier"])
+        self.assertIn("edge", record["note"])
+
+    def test_refused_browser_access_suppresses_old_denial_marker(self):
+        config = {
+            "FROM_BROWSER": "off", "BROWSER_CONSENT": "false",
+            "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge",
+        }
+        with _Hermetic():
+            record = doctor._x_record(config)
+        self.assertNotIn("permission denied", record.get("note", ""))
+
+    def test_denial_marker_invalidates_cached_doctor_result(self):
+        before = doctor._config_fingerprint({"FROM_BROWSER": "edge"})
+        after = doctor._config_fingerprint({
+            "FROM_BROWSER": "edge", "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge",
+        })
+        assert before != after
 
     def test_x_stays_off_when_bird_installed_but_no_consent(self):
         # bird installed but FROM_BROWSER=off -> no cookie path -> genuinely off.
@@ -976,6 +1092,23 @@ class JsonContract(unittest.TestCase):
         self.assertIsNotNone(served)
         self.assertIn("audit_state", served["sources"]["reddit"])
         self.assertIn("WORKING", doctor.render_text(served))
+
+    def test_cached_denial_invalidated_by_browser_gate_changes(self):
+        tmp = Path(tempfile.mkdtemp()) / "doctor-cache.json"
+        config = {
+            "FROM_BROWSER": "edge",
+            "BROWSER_CONSENT": "true",
+            "LAST30DAYS_X_COOKIE_ACCESS_DENIED": "edge",
+        }
+        with _Hermetic(), mock.patch("lib.doctor.cache_path", return_value=tmp):
+            report = doctor.build_report(config)
+            report["generated_at"] = datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat()
+            self.assertTrue(doctor._write_cache(report, config))
+            self.assertIsNotNone(doctor.read_cached_report(config))
+            self.assertIsNone(doctor.read_cached_report({**config, "BROWSER_CONSENT": "false"}))
+            self.assertIsNone(doctor.read_cached_report({**config, "FROM_BROWSER": "off"}))
 
 
 class LiveProbe(unittest.TestCase):

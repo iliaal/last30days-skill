@@ -20,6 +20,92 @@ from lib.cookie_extract import (
     _get_firefox_profiles_dir,
 )
 
+
+def test_firefox_database_permission_denial_survives_extractor(tmp_path):
+    db = tmp_path / "cookies.sqlite"
+    db.touch()
+    with patch(
+        "lib.cookie_extract.shutil.copyfile",
+        side_effect=PermissionError(1, "Operation not permitted", str(db)),
+    ):
+        with pytest.raises(PermissionError):
+            _query_cookies_db(db, ".x.com", ["auth_token", "ct0"])
+
+
+def test_firefox_database_discovery_preserves_stat_permission_denial(tmp_path):
+    db = tmp_path / "cookies.sqlite"
+    real_stat = Path.stat
+    real_is_file = Path.is_file
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == db:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    def simulated_py314_is_file(path, *args, **kwargs):
+        if path == db:
+            return False
+        return real_is_file(path, *args, **kwargs)
+
+    with patch.object(Path, "stat", guarded_stat), patch.object(
+        Path, "is_file", simulated_py314_is_file
+    ):
+        with pytest.raises(PermissionError):
+            _query_cookies_db(db, ".x.com", ["auth_token", "ct0"])
+
+
+def test_wsl_firefox_directory_skips_denied_user_for_accessible_user(tmp_path):
+    users = tmp_path / "Users"
+    denied_user = users / "aaa"
+    available = users / "bbb" / "AppData" / "Roaming" / "Mozilla" / "Firefox"
+    denied_user.mkdir(parents=True)
+    available.mkdir(parents=True)
+    real_stat = Path.stat
+    real_is_dir = Path.is_dir
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == denied_user:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    def simulated_py314_is_dir(path, *args, **kwargs):
+        if path == denied_user:
+            return False
+        return real_is_dir(path, *args, **kwargs)
+
+    with patch("lib.cookie_extract.Path", return_value=users), patch.object(
+        Path, "stat", guarded_stat
+    ), patch.object(Path, "is_dir", simulated_py314_is_dir):
+        found = cookie_extract._get_wsl_firefox_profiles_dir()
+    assert found == available
+
+
+def test_linux_firefox_directory_tries_xdg_after_default_denial(tmp_path, monkeypatch):
+    blocked = tmp_path / ".mozilla" / "firefox"
+    available = tmp_path / "xdg" / "mozilla" / "firefox"
+    available.mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    real_stat = Path.stat
+    real_is_dir = Path.is_dir
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == blocked:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    def simulated_py314_is_dir(path, *args, **kwargs):
+        if path == blocked:
+            return False
+        return real_is_dir(path, *args, **kwargs)
+
+    with patch("lib.cookie_extract.Path.home", return_value=tmp_path), patch(
+        "lib.cookie_extract.platform.system", return_value="Linux"
+    ), patch.object(Path, "stat", guarded_stat), patch.object(
+        Path, "is_dir", simulated_py314_is_dir
+    ):
+        found = _get_firefox_profiles_dir()
+    assert found == available
+
 @pytest.fixture
 def mock_firefox_env(tmp_path):
     """Create a mock Firefox profiles directory with cookies.sqlite.
@@ -99,6 +185,30 @@ def mock_firefox_env(tmp_path):
 
 class TestExtractFirefoxCookies:
     """Tests for extract_firefox_cookies."""
+
+    def test_denied_default_copy_uses_complete_pair_in_alternate_profile(self, mock_firefox_env):
+        profiles_dir = mock_firefox_env(
+            profiles={
+                "abc123.default-release": [],
+                "xyz789.other": [
+                    (".x.com", "auth_token", "dummy-auth"),
+                    (".x.com", "ct0", "dummy-ct0"),
+                ],
+            }
+        )
+        blocked = profiles_dir / "abc123.default-release" / "cookies.sqlite"
+        real_copyfile = cookie_extract.shutil.copyfile
+
+        def guarded_copyfile(source, target):
+            if source == str(blocked):
+                raise PermissionError(1, "Operation not permitted", str(blocked))
+            return real_copyfile(source, target)
+
+        with patch("lib.cookie_extract.shutil.copyfile", side_effect=guarded_copyfile):
+            found = cookie_extract._try_firefox_dir(
+                profiles_dir, ".x.com", ["auth_token", "ct0"]
+            )
+        assert found == {"auth_token": "dummy-auth", "ct0": "dummy-ct0"}
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not reliable on Windows")
     def test_temp_cookie_db_copy_is_owner_only(self, tmp_path):

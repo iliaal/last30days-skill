@@ -30,6 +30,85 @@ from lib.chrome_cookies import (
     extract_chrome_cookies_macos,
 )
 
+
+def test_cookie_copy_permission_denial_is_not_reported_as_missing(tmp_path):
+    db = tmp_path / "Cookies"
+    db.touch()
+    with mock.patch(
+        "lib.chrome_cookies.shutil.copyfile",
+        side_effect=PermissionError(1, "Operation not permitted", str(db)),
+    ):
+        with pytest.raises(PermissionError):
+            _extract_chromium_cookies_macos(
+                db, "Microsoft Edge Safe Storage", ".x.com", ["auth_token", "ct0"]
+            )
+
+
+def test_temporary_storage_denial_is_not_blamed_on_browser_access(tmp_path):
+    db = tmp_path / "Cookies"
+    db.touch()
+    denied_temp = tmp_path / "temporary.sqlite"
+    with mock.patch(
+        "lib.chrome_cookies.shutil.copyfile",
+        side_effect=PermissionError(13, "Permission denied", str(denied_temp)),
+    ):
+        assert _extract_chromium_cookies_macos(
+            db, "Microsoft Edge Safe Storage", ".x.com", ["auth_token", "ct0"]
+        ) is None
+
+
+def test_keychain_permission_denial_is_not_blamed_on_browser_database():
+    with mock.patch(
+        "lib.chrome_cookies.subprocess.run",
+        side_effect=PermissionError(1, "Operation not permitted", "security"),
+    ):
+        assert chrome_cookies._get_chromium_encryption_key("Microsoft Edge Safe Storage") is None
+
+
+def test_profile_discovery_preserves_permission_denial_when_stat_fails(tmp_path):
+    blocked = tmp_path / "Default" / "Network" / "Cookies"
+    real_stat = Path.stat
+    real_exists = Path.exists
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == blocked:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    def simulated_py314_exists(path, *args, **kwargs):
+        if path == blocked:
+            return False
+        return real_exists(path, *args, **kwargs)
+
+    with mock.patch.object(Path, "stat", guarded_stat), mock.patch.object(
+        Path, "exists", simulated_py314_exists
+    ):
+        with pytest.raises(PermissionError):
+            chrome_cookies._profile_cookie_db(tmp_path / "Default")
+
+
+def test_profile_directory_discovery_preserves_permission_denial(tmp_path):
+    blocked = tmp_path / "Profile 1"
+    blocked.mkdir()
+    real_stat = Path.stat
+    real_is_dir = Path.is_dir
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == blocked:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    def simulated_py314_is_dir(path, *args, **kwargs):
+        if path == blocked:
+            return False
+        return real_is_dir(path, *args, **kwargs)
+
+    with mock.patch.object(Path, "stat", guarded_stat), mock.patch.object(
+        Path, "is_dir", simulated_py314_is_dir
+    ):
+        with pytest.raises(PermissionError):
+            chrome_cookies._find_all_chromium_cookies_dbs(tmp_path)
+
 # ---------------------------------------------------------------------------
 # Helpers — create real encrypted cookie values using known key + system openssl
 # ---------------------------------------------------------------------------
@@ -120,6 +199,49 @@ def _create_chrome_cookies_db(path: str, cookies: list[tuple], db_version: int =
         )
     conn.commit()
     conn.close()
+
+
+def test_denied_modern_path_uses_accessible_legacy_cookie_database(tmp_path):
+    profile = tmp_path / "Default"
+    profile.mkdir()
+    legacy = profile / "Cookies"
+    legacy.touch()
+    blocked = profile / "Network" / "Cookies"
+    real_stat = Path.stat
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == blocked:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    with mock.patch.object(Path, "stat", guarded_stat):
+        assert chrome_cookies._profile_cookie_db(profile) == legacy
+
+
+def test_denied_default_copy_uses_complete_pair_in_later_profile(tmp_path):
+    default = tmp_path / "Default" / "Network"
+    alternate = tmp_path / "Profile 1" / "Network"
+    default.mkdir(parents=True)
+    alternate.mkdir(parents=True)
+    blocked = default / "Cookies"
+    blocked.touch()
+    available = alternate / "Cookies"
+    _create_chrome_cookies_db(str(available), [
+        (".x.com", "auth_token", "dummy-auth", b""),
+        (".x.com", "ct0", "dummy-ct0", b""),
+    ])
+    real_copyfile = shutil.copyfile
+
+    def guarded_copyfile(source, target):
+        if source == str(blocked):
+            raise PermissionError(1, "Operation not permitted", str(blocked))
+        return real_copyfile(source, target)
+
+    with mock.patch("lib.chrome_cookies.shutil.copyfile", side_effect=guarded_copyfile):
+        found = chrome_cookies._extract_chromium_cookies_any_profile(
+            tmp_path, "Chrome Safe Storage", ".x.com", ["auth_token", "ct0"]
+        )
+    assert found == {"auth_token": "dummy-auth", "ct0": "dummy-ct0"}
 
 # ---------------------------------------------------------------------------
 # PKCS7 padding tests

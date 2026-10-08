@@ -3415,9 +3415,19 @@ def _main(
             for browser in results.get("cookies_found", {}).values()
         )
         from_browser = ",".join(found_browsers) or None
+        denied_browsers = (
+            results.get("x_cookie_access_denied", [])
+            if results.get("browser_cookie_scan_attempted") else []
+        )
+        prior_denial = config.get("LAST30DAYS_X_COOKIE_ACCESS_DENIED")
+        denial_marker = (
+            ",".join(denied_browsers) or ("none" if prior_denial else None)
+            if results.get("browser_cookie_scan_attempted") else None
+        )
         results["env_written"] = setup_wizard.write_setup_config(
             env.CONFIG_FILE,
             from_browser=from_browser,
+            x_cookie_access_denied=denial_marker,
             browser_consent=(
                 None if args.diagnose else _setup_allows_browser_cookies(args, extra_argv)
             ),
